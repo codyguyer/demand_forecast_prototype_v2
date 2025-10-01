@@ -75,6 +75,60 @@ class SARIMAForecaster:
         print(f"Successfully combined {len(self.combined_data)} product groups")
         return self.combined_data
 
+    def get_salesforce_feature_mode(self, group_name):
+        """Determine which Salesforce feature set to use for a product group."""
+        mode_config = getattr(self.config, "SALESFORCE_FEATURE_MODE_BY_GROUP", "quantity")
+
+        if isinstance(mode_config, dict):
+            if group_name in mode_config:
+                return mode_config[group_name]
+            return mode_config.get("default", "quantity")
+        if isinstance(mode_config, str):
+            return mode_config
+
+        return "quantity"
+
+    def filter_salesforce_features(self, features_df, group_name):
+        """Filter Salesforce features based on configuration."""
+        if features_df is None or features_df.empty:
+            return None
+
+        mode = self.get_salesforce_feature_mode(group_name)
+        column_sets = getattr(self.config, "SALESFORCE_FEATURE_COLUMN_SETS", None)
+
+        configured_columns = None
+        if isinstance(column_sets, dict):
+            if mode in column_sets:
+                configured_columns = column_sets[mode]
+            elif "default" in column_sets:
+                configured_columns = column_sets["default"]
+
+        if configured_columns:
+            features_df = features_df.copy()
+            missing = [col for col in configured_columns if col not in features_df.columns]
+
+            if missing:
+                print(f"Configured Salesforce features missing for {group_name} ({mode}): {missing}")
+                for col in missing:
+                    features_df[col] = 0.0
+
+            return features_df[configured_columns]
+
+        quantity_columns = [col for col in features_df.columns if "Quantity" in col]
+        amount_columns = [col for col in features_df.columns if "Amount" in col or "Dollar" in col]
+
+        if mode == "dollars" and amount_columns:
+            return features_df[amount_columns]
+        if mode == "quantity" and quantity_columns:
+            return features_df[quantity_columns]
+
+        if quantity_columns:
+            return features_df[quantity_columns]
+        if amount_columns:
+            return features_df[amount_columns]
+
+        return features_df
+
     def analyze_seasonality(self, series, group_name):
         """Analyze seasonality patterns in the data"""
         print(f"Analyzing seasonality for {group_name}...")
@@ -213,7 +267,12 @@ class SARIMAForecaster:
             forecast_result = model.get_forecast(steps=steps, exog=exog_future)
             forecast_mean = forecast_result.predicted_mean
 
-            conf_int = forecast_result.conf_int(alpha=1 - self.config.CONFIDENCE_LEVEL)
+            conf_int = forecast_result.conf_int(alpha=1 - self.config.CONFIDENCE_LEVEL).copy()
+
+            if getattr(self.config, 'ENFORCE_NON_NEGATIVE_FORECASTS', False):
+                forecast_mean = forecast_mean.clip(lower=0)
+                conf_int.iloc[:, 0] = conf_int.iloc[:, 0].clip(lower=0)
+                conf_int.iloc[:, 1] = conf_int.iloc[:, 1].clip(lower=0)
 
             return {
                 'forecast': forecast_mean,
@@ -305,6 +364,8 @@ class SARIMAForecaster:
                     actuals_with_index, group_name
                 )
 
+                features = self.filter_salesforce_features(features, group_name) if features is not None else None
+
                 if features is not None and not features.empty:
                     potential_future = self.salesforce_integration.create_future_exog_features(
                         group_name,
@@ -313,13 +374,18 @@ class SARIMAForecaster:
                     )
 
                     if potential_future is not None and not potential_future.empty:
-                        exog_features = features.astype(float)
-                        exog_future = potential_future.astype(float).fillna(0.0)
-                        ts_data = y_series.astype(float)
+                        potential_future = self.filter_salesforce_features(potential_future, group_name)
+                        if potential_future is not None and not potential_future.empty:
+                            potential_future = potential_future.reindex(columns=features.columns, fill_value=0.0)
+                            exog_features = features.astype(float)
+                            exog_future = potential_future.astype(float).fillna(0.0)
+                            ts_data = y_series.astype(float)
+                        else:
+                            print(f"Filtered Salesforce features lack future coverage for {group_name}; proceeding without exogenous inputs.")
                     else:
                         print(f"Salesforce features lack future coverage for {group_name}; proceeding without exogenous inputs.")
                 else:
-                    print(f"Salesforce features unavailable for {group_name}; proceeding without exogenous inputs.")
+                    print(f"Salesforce features unavailable or filtered out for {group_name}; proceeding without exogenous inputs.")
 
             if exog_features is not None and (exog_future is None or exog_future.empty):
                 print(f"Salesforce features missing forecast horizon coverage for {group_name}; proceeding without exogenous inputs.")

@@ -45,6 +45,32 @@ class SARIMAConfig:
         "close_date": "Close Date"
     }
 
+    # Salesforce feature controls
+    SALESFORCE_FEATURE_COLUMN_SETS = {
+        "quantity": [
+            "Weighted_Pipeline_Quantity",
+            "Pipeline_Quantity_Lag1",
+            "Pipeline_Quantity_Lag3",
+            "Pipeline_Quantity_MA3"
+        ],
+        "dollars": [
+            "Weighted_Pipeline_Amount",
+            "Pipeline_Amount_Lag1",
+            "Pipeline_Amount_Lag3",
+            "Pipeline_Amount_MA3"
+        ]
+    }
+
+    SALESFORCE_FEATURE_MODE_BY_GROUP = {
+        "default": "quantity",
+        "M11_dental": "quantity",
+        "M11_vet": "quantity",
+        "M9_dental": "quantity",
+        "M9_vet": "quantity"
+    }
+
+    ENFORCE_NON_NEGATIVE_FORECASTS = True
+
     # Seasonality detection thresholds
     SEASONALITY_THRESHOLD = 0.3  # Minimum seasonal component strength to consider seasonal
     MIN_OBSERVATIONS = 24  # Minimum observations needed for reliable seasonal analysis
