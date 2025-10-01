@@ -1,0 +1,20 @@
+# Ignore raw data exports and generated forecast outputs
+Actuals.csv
+salesforce_data.csv
+sarima_forecast_results.csv
+
+# Ignore generated analysis artifacts
+forecast_results_archive/
+plots/
+
+# Python cache / build artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
+.env/
+.venv/
+venv/
+ENV/
