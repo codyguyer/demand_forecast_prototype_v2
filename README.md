@@ -1,4 +1,4 @@
-﻿# Demand Forecast Prototype v2
+# Demand Forecast Prototype v2
 
 Enhanced SARIMA-based demand forecasting pipeline that can incorporate Salesforce pipeline data as exogenous drivers. The project is optimized for monthly product-group forecasting, produces metrics and plots, and can be extended with additional data sources.
 
@@ -52,11 +52,11 @@ The script will:
 The integration aggregates opportunities monthly, builds lagged/rolling signals, and aligns future periods to match the forecast horizon.
 
 ## Repository Structure
-- `main.py` – CLI entry point for running the full pipeline.
-- `config.py` – Central configuration for data paths and modeling parameters.
-- `sarima_model.py` – Core SARIMA/SARIMAX modeling workflow.
-- `salesforce_integration.py` – Salesforce ingestion and feature engineering utilities.
-- `requirements.txt` – Python dependency list.
+- `main.py` ? CLI entry point for running the full pipeline.
+- `config.py` ? Central configuration for data paths and modeling parameters.
+- `sarima_model.py` ? Core SARIMA/SARIMAX modeling workflow.
+- `salesforce_integration.py` ? Salesforce ingestion and feature engineering utilities.
+- `requirements.txt` ? Python dependency list.
 
 ## Contributing
 1. Fork the repository and create a feature branch.
