@@ -27,10 +27,10 @@ class SARIMAConfig:
     # P,D,Q: seasonal AR, differencing, MA order
     # s: seasonal period (12 for monthly data with annual seasonality)
     SARIMA_PARAMS = {
-        "M11_dental": (1, 1, 1, 1, 1, 1, 12),
-        "M11_vet": (1, 1, 1, 1, 1, 1, 12),
-        "M9_dental": (2, 1, 2, 1, 1, 1, 12),
-        "M9_vet": (1, 1, 1, 0, 1, 1, 12)
+        "M11_dental": (1, 0, 1, 0, 0, 1, 12),
+        "M11_vet": (0, 0, 1, 0, 1, 1, 12),
+        "M9_dental": (0, 1, 1, 0, 0, 1, 12),
+        "M9_vet": (1, 0, 1, 0, 0, 1, 12)
     }
 
     # Model evaluation parameters
