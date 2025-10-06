@@ -10,11 +10,14 @@ import seaborn as sns
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
+from statistics import NormalDist
 
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from statsmodels.tsa.seasonal import seasonal_decompose
 from statsmodels.tsa.stattools import adfuller
 from statsmodels.stats.diagnostic import acorr_ljungbox
+from statsmodels.tsa.forecasting.theta import ThetaModel
+from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from sklearn.metrics import mean_absolute_error
 import os
 
@@ -32,6 +35,7 @@ class SARIMAForecaster:
         self.models = {}
         self.forecasts = {}
         self.metrics = {}
+        self.model_strategy = {}
         self.combined_data = {}
         self.salesforce_integration = None
 
@@ -235,6 +239,184 @@ class SARIMAForecaster:
                 print(f"Fallback model also failed for {group_name}: {e2}")
                 return None
 
+    def should_use_short_series_arima(self, series, group_name):
+        """Decide if the medium-history ARIMA fallback should be used."""
+        if not getattr(self.config, "SHORT_SERIES_ARIMA_ENABLED", False):
+            return False
+
+        series_len = len(series)
+        sarima_min = getattr(self.config, "SARIMA_MIN_HISTORY", None)
+        arima_min = getattr(self.config, "ARIMA_MIN_HISTORY", getattr(self.config, "SHORT_SERIES_THRESHOLD", 24))
+
+        if sarima_min is not None and series_len >= sarima_min:
+            return False
+        if series_len < arima_min:
+            return False
+
+        forced = getattr(self.config, "SHORT_SERIES_FORCE_GROUPS", None)
+        if forced and group_name in forced:
+            return True
+
+        return True
+
+    def should_use_theta_ets(self, series, group_name):
+        """Decide if the very short-history ETS/Theta blend should be used."""
+        if not getattr(self.config, "ETS_THETA_ENABLED", False):
+            return False
+
+        series_len = len(series)
+        arima_min = getattr(self.config, "ARIMA_MIN_HISTORY", getattr(self.config, "SHORT_SERIES_THRESHOLD", 24))
+
+        if series_len >= arima_min:
+            return False
+
+        forced = getattr(self.config, "ETS_THETA_FORCE_GROUPS", None)
+        if forced and group_name in forced:
+            return True
+
+        min_obs = getattr(self.config, "MIN_OBSERVATIONS", 12)
+        return series_len >= min_obs
+
+    def determine_model_strategy(self, series, group_name):
+        """Select which forecasting approach to use for a product group."""
+        series_len = len(series)
+        sarima_min = getattr(self.config, "SARIMA_MIN_HISTORY", None)
+        arima_min = getattr(self.config, "ARIMA_MIN_HISTORY", getattr(self.config, "SHORT_SERIES_THRESHOLD", 24))
+
+        if sarima_min is not None and series_len >= sarima_min:
+            return 'SARIMA'
+
+        if self.should_use_short_series_arima(series, group_name):
+            return 'ARIMA'
+
+        if self.should_use_theta_ets(series, group_name):
+            return 'ETS_THETA'
+
+        if sarima_min is None or series_len >= sarima_min:
+            return 'SARIMA'
+
+        if getattr(self.config, "SHORT_SERIES_ARIMA_ENABLED", False) and series_len >= arima_min:
+            return 'ARIMA'
+
+        if getattr(self.config, "ETS_THETA_ENABLED", False):
+            return 'ETS_THETA'
+
+        return 'SARIMA'
+
+    def get_short_series_arima_order(self, group_name):
+        """Retrieve the ARIMA(p,d,q) order for a short-history series."""
+        params = getattr(self.config, "SHORT_SERIES_ARIMA_PARAMS", None) or {}
+        if isinstance(params, dict) and group_name in params:
+            return params[group_name]
+
+        return getattr(self.config, "SHORT_SERIES_ARIMA_DEFAULT_ORDER", (1, 1, 1))
+
+    def fit_theta_ets_model(self, group_name, train_data):
+        """Fit an ETS/Theta blend model for very short history groups."""
+        weights = getattr(self.config, "ETS_THETA_WEIGHTS", (0.5, 0.5))
+        if (not isinstance(weights, (list, tuple))) or len(weights) != 2:
+            weights = (0.5, 0.5)
+        theta_weight, ets_weight = weights
+        total_weight = theta_weight + ets_weight
+        if total_weight == 0:
+            theta_weight = ets_weight = 0.5
+            total_weight = 1.0
+        theta_weight /= total_weight
+        ets_weight /= total_weight
+
+        theta_period_cfg = getattr(self.config, "ETS_THETA_PERIOD", 12) or 12
+        theta_period = max(2, min(int(theta_period_cfg), max(2, len(train_data))))
+
+        theta_result = None
+        try:
+            theta_model = ThetaModel(train_data, period=theta_period)
+            theta_result = theta_model.fit()
+        except Exception as exc:
+            print(f"Warning: ThetaModel failed for {group_name}: {exc}")
+
+        ets_result = None
+        trend = getattr(self.config, "ETS_THETA_TREND", 'add')
+        if trend in (None, 'none', 'None'):
+            trend = None
+        seasonal = getattr(self.config, "ETS_THETA_SEASONAL", None)
+        if seasonal in (None, 'none', 'None'):
+            seasonal = None
+        seasonal_periods = getattr(self.config, "ETS_THETA_SEASONAL_PERIODS", None)
+        if seasonal is not None and seasonal_periods is None:
+            seasonal_periods = theta_period
+        if seasonal_periods is not None and seasonal_periods > len(train_data):
+            print(f"Warning: Not enough data for seasonal ETS component on {group_name}; disabling seasonality.")
+            seasonal = None
+            seasonal_periods = None
+        damped = bool(getattr(self.config, "ETS_THETA_DAMPED", False))
+
+        try:
+            ets_model = ExponentialSmoothing(
+                train_data,
+                trend=trend,
+                damped_trend=damped if trend is not None else False,
+                seasonal=seasonal,
+                seasonal_periods=seasonal_periods,
+                initialization_method='estimated'
+            )
+            ets_result = ets_model.fit(optimized=True)
+        except Exception as exc:
+            print(f"Warning: ETS component failed for {group_name}: {exc}")
+
+        if theta_result is None and ets_result is None:
+            print(f"Error: Unable to fit ETS/Theta blend for {group_name}.")
+            return None
+
+        if theta_result is None:
+            theta_weight, ets_weight = 0.0, 1.0
+        elif ets_result is None:
+            theta_weight, ets_weight = 1.0, 0.0
+
+        resid_std = None
+        if ets_result is not None and hasattr(ets_result, 'resid'):
+            import numpy as np
+            resid = np.asarray(ets_result.resid)
+            resid = resid[~np.isnan(resid)]
+            if resid.size > 1:
+                resid_std = float(resid.std(ddof=1))
+
+        return {
+            'theta': theta_result,
+            'ets': ets_result,
+            'weights': (theta_weight, ets_weight),
+            'resid_std': resid_std
+        }
+
+    def fit_arima_model(self, group_name, train_data, exog_train=None):
+        """Fit a non-seasonal ARIMA model for short-history product groups."""
+        order = self.get_short_series_arima_order(group_name)
+        print(f"Using short-history ARIMA{order} for {group_name} (no seasonal component)")
+
+        if exog_train is not None and exog_train.empty:
+            exog_train = None
+
+        if exog_train is not None:
+            exog_train = exog_train.astype(float)
+
+        try:
+            model = SARIMAX(
+                train_data,
+                exog=exog_train,
+                order=order,
+                seasonal_order=(0, 0, 0, 0),
+                enforce_stationarity=False,
+                enforce_invertibility=False
+            )
+
+            fitted_model = model.fit(disp=False)
+            print(f"Short-history ARIMA fitted successfully for {group_name}")
+            print(f"AIC: {fitted_model.aic:.2f}")
+            return fitted_model
+
+        except Exception as exc:
+            print(f"Error fitting ARIMA fallback for {group_name}: {exc}")
+            return None
+
     def calculate_metrics(self, actual, predicted, group_name):
         """Calculate bias% and MAE metrics"""
         # Remove any NaN values
@@ -258,6 +440,70 @@ class SARIMAForecaster:
         print(f"{group_name} - MAE: {mae:.2f}, Bias%: {bias_percent:.2f}%")
 
         return {"bias_percent": bias_percent, "mae": mae}
+
+    def forecast_theta_ets(self, model_bundle, steps, start_index, group_name):
+        """Generate forecasts and confidence intervals for the ETS/Theta blend."""
+        if model_bundle is None or steps <= 0:
+            return None
+
+        forecast_index = pd.date_range(
+            start=start_index + pd.DateOffset(months=1),
+            periods=steps,
+            freq='MS'
+        )
+
+        theta_res = model_bundle.get('theta')
+        ets_res = model_bundle.get('ets')
+        weight_theta, weight_ets = model_bundle.get('weights', (0.5, 0.5))
+
+        if theta_res is not None:
+            theta_forecast = theta_res.forecast(steps)
+            theta_forecast = pd.Series(theta_forecast.values, index=forecast_index)
+        else:
+            theta_forecast = pd.Series(np.zeros(steps), index=forecast_index, dtype=float)
+
+        if ets_res is not None:
+            ets_forecast = ets_res.forecast(steps)
+            ets_forecast = pd.Series(ets_forecast.values, index=forecast_index)
+        else:
+            ets_forecast = pd.Series(np.zeros(steps), index=forecast_index, dtype=float)
+
+        blended = weight_theta * theta_forecast + weight_ets * ets_forecast
+
+        lower = upper = None
+        alpha = 1 - getattr(self.config, 'CONFIDENCE_LEVEL', 0.9)
+        if theta_res is not None and hasattr(theta_res, 'prediction_intervals'):
+            try:
+                theta_intervals = theta_res.prediction_intervals(steps=steps, alpha=alpha)
+                theta_lower = pd.Series(theta_intervals['lower'].values, index=forecast_index)
+                theta_upper = pd.Series(theta_intervals['upper'].values, index=forecast_index)
+                adjustment = blended - theta_forecast
+                lower = theta_lower + adjustment
+                upper = theta_upper + adjustment
+            except Exception as exc:
+                print(f"Warning: Theta intervals unavailable for {group_name}: {exc}")
+
+        if lower is None or upper is None:
+            resid_std = model_bundle.get('resid_std')
+            if resid_std is not None and resid_std > 0:
+                z_score = NormalDist().inv_cdf(0.5 + getattr(self.config, 'CONFIDENCE_LEVEL', 0.9) / 2)
+                delta = z_score * resid_std
+                lower = blended - delta
+                upper = blended + delta
+            else:
+                lower = blended.copy()
+                upper = blended.copy()
+
+        if getattr(self.config, 'ENFORCE_NON_NEGATIVE_FORECASTS', False):
+            blended = blended.clip(lower=0)
+            lower = lower.clip(lower=0)
+            upper = upper.clip(lower=0)
+
+        return {
+            'forecast': blended,
+            'conf_int_lower': lower,
+            'conf_int_upper': upper
+        }
 
     def generate_forecast(self, model, steps, group_name, exog_future=None):
         """Generate forecast with confidence intervals"""
@@ -316,7 +562,8 @@ class SARIMAForecaster:
                            forecast_data['conf_int_upper'],
                            alpha=0.3, color='red', label=f'{int(self.config.CONFIDENCE_LEVEL*100)}% Confidence Interval')
 
-        plt.title(f'{group_name} - SARIMA Forecast')
+        model_label = self.model_strategy.get(group_name, 'SARIMA')
+        plt.title(f'{group_name} - {model_label} Forecast')
         plt.xlabel('Date')
         plt.ylabel('Demand')
         plt.legend()
@@ -353,12 +600,15 @@ class SARIMAForecaster:
                 print(f"Warning: {group_name} has insufficient data. Skipping...")
                 continue
 
+            strategy = self.determine_model_strategy(ts_data, group_name)
+            print(f"Selected {strategy} strategy for {group_name} (history={len(ts_data)} months)")
+
             forecast_start = ts_data.index[-1] + pd.DateOffset(months=1)
 
             exog_features = None
             exog_future = None
 
-            if self.salesforce_integration:
+            if strategy != 'ETS_THETA' and self.salesforce_integration:
                 actuals_with_index = ts_data.to_frame(name='Actuals')
                 y_series, features = self.salesforce_integration.merge_with_actuals(
                     actuals_with_index, group_name
@@ -392,16 +642,19 @@ class SARIMAForecaster:
                 exog_features = None
                 exog_future = None
 
-            # Analyze seasonality
-            self.analyze_seasonality(ts_data, group_name)
+            if strategy == 'SARIMA':
+                # Analyze seasonality
+                self.analyze_seasonality(ts_data, group_name)
 
-            # Check stationarity
-            self.check_stationarity(ts_data, group_name)
+                # Check stationarity
+                self.check_stationarity(ts_data, group_name)
+            else:
+                print('Skipping detailed seasonality diagnostics for non-SARIMA strategy.')
 
             exog_train = None
             exog_test = None
 
-            if exog_features is not None:
+            if strategy != 'ETS_THETA' and exog_features is not None:
                 split_point = len(ts_data) - self.config.TEST_SPLIT_MONTHS
                 if split_point <= 0:
                     print(f"Warning: Not enough observations after holdout for {group_name}. Skipping...")
@@ -428,32 +681,52 @@ class SARIMAForecaster:
                 print(f"Warning: {group_name} has no training data after split. Skipping...")
                 continue
 
-            model = self.fit_sarima_model(group_name, train_data, exog_train)
+            if strategy == 'SARIMA':
+                model = self.fit_sarima_model(group_name, train_data, exog_train)
+            elif strategy == 'ARIMA':
+                model = self.fit_arima_model(group_name, train_data, exog_train)
+            else:
+                model = self.fit_theta_ets_model(group_name, train_data)
+
             if model is None:
+                print(f'Unable to fit model for {group_name}; skipping forecast.')
                 continue
 
             self.models[group_name] = model
+            self.model_strategy[group_name] = strategy
 
             if len(test_data) > 0:
-                if exog_test is not None and not exog_test.empty:
+                if strategy == 'ETS_THETA':
+                    test_result = self.forecast_theta_ets(model, len(test_data), train_data.index[-1], group_name)
+                    if test_result is None:
+                        print(f"Unable to generate test forecast for {group_name}.")
+                        continue
+                    test_predictions = test_result['forecast']
+                elif exog_test is not None and not exog_test.empty:
                     test_forecast = model.get_forecast(
                         steps=len(test_data),
                         exog=exog_test.fillna(0.0)
                     )
+                    test_predictions = test_forecast.predicted_mean
                 else:
                     test_forecast = model.get_forecast(steps=len(test_data))
+                    test_predictions = test_forecast.predicted_mean
 
-                test_predictions = test_forecast.predicted_mean
                 self.metrics[group_name] = self.calculate_metrics(
-                    test_data.values, test_predictions.values, group_name
+                    test_data.values,
+                    test_predictions.values if hasattr(test_predictions, 'values') else np.asarray(test_predictions),
+                    group_name
                 )
 
-            forecast = self.generate_forecast(
-                model,
-                self.config.FORECAST_MONTHS,
-                group_name,
-                exog_future
-            )
+            if strategy == 'ETS_THETA':
+                forecast = self.forecast_theta_ets(model, self.config.FORECAST_MONTHS, ts_data.index[-1], group_name)
+            else:
+                forecast = self.generate_forecast(
+                    model,
+                    self.config.FORECAST_MONTHS,
+                    group_name,
+                    exog_future
+                )
 
             if forecast:
                 self.forecasts[group_name] = forecast
@@ -467,12 +740,12 @@ class SARIMAForecaster:
                 for i, date in enumerate(forecast_dates):
                     results_summary.append({
                         'Product_Group': group_name,
+                        'Model_Type': self.model_strategy.get(group_name, 'SARIMA'),
                         'Date': date.strftime('%Y-%m'),
                         'Forecast': round(forecast['forecast'].iloc[i], 0),
                         'Lower_CI': round(forecast['conf_int_lower'].iloc[i], 0),
                         'Upper_CI': round(forecast['conf_int_upper'].iloc[i], 0)
                     })
-
             self.plot_results(group_name, train_data, test_data, forecast)
 
         if self.config.SAVE_RESULTS and results_summary:
@@ -483,6 +756,7 @@ class SARIMAForecaster:
         self.print_summary()
 
         return results_summary
+
     def print_summary(self):
         """Print summary of forecasting results"""
         print("\n" + "="*50)
@@ -499,9 +773,11 @@ class SARIMAForecaster:
                 print(f"{group}: MAE={metrics['mae']:.2f}, Bias%={metrics['bias_percent']:.2f}%")
 
         if self.forecasts:
-            print(f"\nNext 12-month forecasts generated for:")
+            print("\nNext 12-month forecasts generated for:")
             for group in self.forecasts.keys():
-                print(f"  • {group}")
+                model_used = self.model_strategy.get(group, 'SARIMA')
+                print(f"  - {group} ({model_used})")
+
 
         print(f"\nPlots saved to: {self.config.PLOTS_DIR}/")
         print("="*50)

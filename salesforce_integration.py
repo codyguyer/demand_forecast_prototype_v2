@@ -14,6 +14,19 @@ class SalesforceIntegration:
     Framework for integrating Salesforce pipeline data into SARIMA forecasting
     """
 
+    @staticmethod
+    def normalize_product_code(code):
+        """Normalize product identifiers so Salesforce matches actuals mapping."""
+        if pd.isna(code):
+            return ""
+        normalized = str(code).strip().upper().replace(" ", "")
+        for prefix in ("ITEM_", "ITEM", "PROD_", "PROD"):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):]
+                break
+        normalized = normalized.lstrip("_")
+        return normalized
+
     def __init__(self, config=None):
         self.config = config or SARIMAConfig()
         self.pipeline_data = None
@@ -42,6 +55,13 @@ class SalesforceIntegration:
         self.pipeline_data = self.pipeline_data.rename(columns=column_mapping)
         self.pipeline_data['CloseDate'] = pd.to_datetime(self.pipeline_data['CloseDate'])
 
+        if 'Product' in self.pipeline_data.columns:
+            self.pipeline_data['Product'] = self.pipeline_data['Product'].astype(str)
+            self.pipeline_data['Normalized_Product'] = self.pipeline_data['Product'].apply(self.normalize_product_code)
+        else:
+            self.pipeline_data['Normalized_Product'] = ''
+            print('Warning: Salesforce data missing Product column; normalization skipped.')
+
         print(f"Loaded {len(self.pipeline_data)} Salesforce opportunities")
         return self.pipeline_data
 
@@ -53,19 +73,33 @@ class SalesforceIntegration:
 
         monthly_features = {}
 
+        if self.pipeline_data is None or self.pipeline_data.empty:
+            print('No Salesforce pipeline data available to process.')
+            self.processed_features = {}
+            return {}
+
+        if 'Normalized_Product' not in self.pipeline_data.columns and 'Product' in self.pipeline_data.columns:
+            self.pipeline_data['Normalized_Product'] = self.pipeline_data['Product'].apply(self.normalize_product_code)
+
         forecast_horizon_end = pd.to_datetime(self.config.CURRENT_MONTH) + pd.DateOffset(months=self.config.FORECAST_MONTHS)
 
         for group_name, products in product_groups.items():
             print(f"Processing pipeline data for {group_name}")
 
+            normalized_targets = {self.normalize_product_code(p) for p in products}
+
             # Filter pipeline data for this product group
             group_pipeline = self.pipeline_data[
-                self.pipeline_data['Product'].isin(products)
+                self.pipeline_data['Normalized_Product'].isin(normalized_targets)
             ].copy()
 
             if len(group_pipeline) == 0:
-                print(f"No pipeline data found for {group_name}")
+                print(f"No pipeline data found for {group_name} after normalization: {sorted(normalized_targets)}")
                 continue
+
+            missing_codes = normalized_targets.difference(set(group_pipeline['Normalized_Product'].unique()))
+            if missing_codes:
+                print(f"Partial Salesforce coverage for {group_name}; missing normalized codes: {sorted(missing_codes)}")
 
             # Create monthly aggregations
             group_pipeline['YearMonth'] = group_pipeline['CloseDate'].dt.to_period('M')
@@ -233,6 +267,19 @@ class EnhancedSARIMAForecaster:
     """
     Enhanced SARIMA forecaster that can optionally use Salesforce data
     """
+
+    @staticmethod
+    def normalize_product_code(code):
+        """Normalize product identifiers so Salesforce matches actuals mapping."""
+        if pd.isna(code):
+            return ""
+        normalized = str(code).strip().upper().replace(" ", "")
+        for prefix in ("ITEM_", "ITEM", "PROD_", "PROD"):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):]
+                break
+        normalized = normalized.lstrip("_")
+        return normalized
 
     def __init__(self, config=None, use_salesforce=False, salesforce_data_path=None):
         self.config = config or SARIMAConfig()

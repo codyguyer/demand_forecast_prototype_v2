@@ -10,15 +10,21 @@ class SARIMAConfig:
     DATA_FILE = "Actuals.csv"
     FORECAST_MONTHS = 12
     CURRENT_MONTH = "2025-10"  # Update this based on current date
-    USE_SALESFORCE = True
+    USE_SALESFORCE = False
     SALESFORCE_DATA_FILE = "salesforce_data.csv"
 
     # Product grouping and replacement mapping
     PRODUCT_GROUPS = {
-        "M11_dental": ["M11-040", "M11-050"],  # M11-040 being replaced by M11-050
-        "M11_vet": ["M11-043", "M11-053"],  # M11-043 being replaced by M11-053
-        "M9_dental": ["M9-040", "M9-050"],  # M9-040 being replaced by M9-050
-        "M9_vet": ["M9-043", "M9-053"]  # M9-043 being replaced by M9-053
+        "M11_dental": ["     ITEM_M11-040", "     ITEM_M11-050"],  # M11-040 being replaced by M11-050
+        "M11_vet": ["     ITEM_M11-043", "     ITEM_M11-053"],  # M11-043 being replaced by M11-053
+        "M9_dental": ["     ITEM_M9-040", "     ITEM_M9-050"],  # M9-040 being replaced by M9-050
+        "M9_vet": ["     ITEM_M9-043", "     ITEM_M9-053"],  # M9-043 being replaced by M9-053
+        "204": ["Prod_204"],
+        "224": ["     Prod_224"],
+        "ECG": ["ITEM_4-000-0080"],
+        "Digital_Vital_Signs": ["     ITEM_4-000-0550"],
+        "250": ["PROD_50"],
+        "253": ["Prod_53"]
     }
 
     # SARIMA parameters (p,d,q,P,D,Q,s) for each product group
@@ -27,10 +33,16 @@ class SARIMAConfig:
     # P,D,Q: seasonal AR, differencing, MA order
     # s: seasonal period (12 for monthly data with annual seasonality)
     SARIMA_PARAMS = {
-        "M11_dental": (1, 0, 1, 0, 0, 1, 12),
-        "M11_vet": (0, 0, 1, 0, 1, 1, 12),
+        "M11_dental": (0, 0, 1, 0, 1, 1, 12),
+        "M11_vet": (0, 1, 1, 1, 1, 1, 12),
         "M9_dental": (0, 1, 1, 0, 0, 1, 12),
-        "M9_vet": (1, 0, 1, 0, 0, 1, 12)
+        "M9_vet": (1, 1, 1, 0, 1, 1, 12),
+        "204": (0, 1, 1, 0, 1, 1, 12),
+        "224": (1, 1, 1, 1, 1, 0, 12),
+        "ECG": (2, 1, 2, 0, 1, 1, 12),
+        "Digital_Vital_Signs": (0, 1, 2, 0, 1, 1, 12),
+        "250": (1, 1, 1, 1, 1, 1, 12),
+        "253": (0, 0, 1, 0, 1, 1, 12)
     }
 
     # Model evaluation parameters
@@ -66,7 +78,13 @@ class SARIMAConfig:
         "M11_dental": "quantity",
         "M11_vet": "quantity",
         "M9_dental": "quantity",
-        "M9_vet": "quantity"
+        "M9_vet": "quantity",
+        "204": "quantity",
+        "224": "quantity",
+        "ECG": "quantity",
+        "Digital_Vital_Signs": "quantity",
+        "250": "quantity",
+        "253": "quantity"
     }
 
     ENFORCE_NON_NEGATIVE_FORECASTS = True
@@ -80,3 +98,23 @@ class SARIMAConfig:
     SAVE_RESULTS = True
     RESULTS_FILE = "sarima_forecast_results.csv"
     PLOTS_DIR = "plots"
+    # Short-history non-seasonal ARIMA fallback
+    SHORT_SERIES_ARIMA_ENABLED = True
+    SHORT_SERIES_THRESHOLD = 24
+    SHORT_SERIES_ARIMA_DEFAULT_ORDER = (1, 1, 1)
+    SHORT_SERIES_ARIMA_PARAMS = {}
+
+    # Model selection thresholds
+    SARIMA_MIN_HISTORY = 36
+    ARIMA_MIN_HISTORY = 24
+
+    # Very short-history ETS/Theta blend fallback
+    ETS_THETA_ENABLED = False
+    ETS_THETA_WEIGHTS = (0.5, 0.5)
+    ETS_THETA_PERIOD = 12
+    ETS_THETA_TREND = 'add'
+    ETS_THETA_SEASONAL = None
+    ETS_THETA_SEASONAL_PERIODS = None
+    ETS_THETA_DAMPED = False
+    ETS_THETA_FORCE_GROUPS = None
+
