@@ -9,9 +9,21 @@ class SARIMAConfig:
     # Data configuration
     DATA_FILE = "Actuals.csv"
     FORECAST_MONTHS = 12
-    CURRENT_MONTH = "2025-10"  # Update this based on current date
+    CURRENT_MONTH = "2025-09"  # Update this based on current date
     USE_SALESFORCE = False
     SALESFORCE_DATA_FILE = "salesforce_data.csv"
+    FORECAST_BY_BU = True
+    BUSINESS_UNITS = ("D100", "D200", "D300")
+    BU_CODE_TO_NAME = {
+        "D100": "Medical",
+        "D200": "Dental",
+        "D300": "Animal Health"
+    }
+    BU_NAME_TO_CODE = {
+        "Medical": "D100",
+        "Dental": "D200",
+        "Animal Health": "D300"
+    }
 
     # Product grouping and replacement mapping
     PRODUCT_GROUPS = {
@@ -34,7 +46,7 @@ class SARIMAConfig:
     # s: seasonal period (12 for monthly data with annual seasonality)
     SARIMA_PARAMS = {
         "M11_dental": (0, 0, 1, 0, 1, 1, 12),
-        "M11_vet": (0, 1, 1, 1, 1, 1, 12),
+        "M11_vet": (1, 1, 1, 1, 1, 1, 12),
         "M9_dental": (0, 1, 1, 0, 0, 1, 12),
         "M9_vet": (1, 1, 1, 0, 1, 1, 12),
         "204": (0, 1, 1, 0, 1, 1, 12),
@@ -54,7 +66,8 @@ class SARIMAConfig:
         "product": "Product Code",
         "weighted_pipeline_dollars": "Weighted Pipeline Dollars",
         "weighted_pipeline_quantity": "Weighted Pipeline Quantity",
-        "close_date": "Close Date"
+        "close_date": "Close Date",
+        "business_unit": "Business Unit"
     }
 
     # Salesforce feature controls

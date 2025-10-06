@@ -31,6 +31,9 @@ class SalesforceIntegration:
         self.config = config or SARIMAConfig()
         self.pipeline_data = None
         self.processed_features = None
+        self.forecast_by_bu = bool(getattr(self.config, "FORECAST_BY_BU", False))
+        self.bu_name_to_code = {str(k).strip().lower(): v for k, v in getattr(self.config, "BU_NAME_TO_CODE", {}).items()}
+        self.bu_code_to_name = getattr(self.config, "BU_CODE_TO_NAME", {})
 
     def load_salesforce_data(self, filepath_or_data):
         """
@@ -45,12 +48,18 @@ class SalesforceIntegration:
             self.pipeline_data = filepath_or_data.copy()
 
         # Standardize column names
-        column_mapping = {
-            self.config.SALESFORCE_FIELDS['product']: 'Product',
-            self.config.SALESFORCE_FIELDS['weighted_pipeline_dollars']: 'Weighted_Pipeline_Amount',
-            self.config.SALESFORCE_FIELDS['weighted_pipeline_quantity']: 'Weighted_Pipeline_Quantity',
-            self.config.SALESFORCE_FIELDS['close_date']: 'CloseDate'
-        }
+        fields = getattr(self.config, "SALESFORCE_FIELDS", {})
+        column_mapping = {}
+        mappings = [
+            (fields.get('product'), 'Product'),
+            (fields.get('weighted_pipeline_dollars'), 'Weighted_Pipeline_Amount'),
+            (fields.get('weighted_pipeline_quantity'), 'Weighted_Pipeline_Quantity'),
+            (fields.get('close_date'), 'CloseDate'),
+            (fields.get('business_unit'), 'Business_Unit_Name')
+        ]
+        for source, target in mappings:
+            if source and source in self.pipeline_data.columns:
+                column_mapping[source] = target
 
         self.pipeline_data = self.pipeline_data.rename(columns=column_mapping)
         self.pipeline_data['CloseDate'] = pd.to_datetime(self.pipeline_data['CloseDate'])
@@ -62,6 +71,27 @@ class SalesforceIntegration:
             self.pipeline_data['Normalized_Product'] = ''
             print('Warning: Salesforce data missing Product column; normalization skipped.')
 
+        if 'Business_Unit_Name' in self.pipeline_data.columns:
+            def map_bu(value):
+                if pd.isna(value):
+                    return None
+                text = str(value).strip()
+                lower = text.lower()
+                if text in self.bu_code_to_name:
+                    return text
+                return self.bu_name_to_code.get(lower, text)
+
+            self.pipeline_data['Business_Unit_Code'] = self.pipeline_data['Business_Unit_Name'].apply(map_bu)
+        elif 'Business_Unit_Code' in self.pipeline_data.columns:
+            self.pipeline_data['Business_Unit_Code'] = self.pipeline_data['Business_Unit_Code'].astype(str).str.strip()
+        elif 'BU' in self.pipeline_data.columns:
+            self.pipeline_data['Business_Unit_Code'] = self.pipeline_data['BU'].astype(str).str.strip()
+        else:
+            self.pipeline_data['Business_Unit_Code'] = None
+
+        if self.forecast_by_bu and self.pipeline_data['Business_Unit_Code'].isnull().all():
+            print("Warning: Salesforce data lacks business unit information; BU-level exogenous features will be unavailable.")
+
         print(f"Loaded {len(self.pipeline_data)} Salesforce opportunities")
         return self.pipeline_data
 
@@ -71,7 +101,7 @@ class SalesforceIntegration:
         """
         print("Processing Salesforce pipeline features...")
 
-        monthly_features = {}
+        processed = {}
 
         if self.pipeline_data is None or self.pipeline_data.empty:
             print('No Salesforce pipeline data available to process.')
@@ -82,6 +112,38 @@ class SalesforceIntegration:
             self.pipeline_data['Normalized_Product'] = self.pipeline_data['Product'].apply(self.normalize_product_code)
 
         forecast_horizon_end = pd.to_datetime(self.config.CURRENT_MONTH) + pd.DateOffset(months=self.config.FORECAST_MONTHS)
+
+        def build_feature_frame(pipeline_df):
+            if pipeline_df.empty:
+                return None
+
+            local_copy = pipeline_df.copy()
+            local_copy['YearMonth'] = local_copy['CloseDate'].dt.to_period('M')
+
+            monthly_agg = local_copy.groupby('YearMonth')[['Weighted_Pipeline_Amount', 'Weighted_Pipeline_Quantity']].sum()
+            if monthly_agg.empty:
+                return None
+
+            monthly_agg.index = monthly_agg.index.to_timestamp(how='start')
+
+            full_index = pd.date_range(
+                start=monthly_agg.index.min(),
+                end=forecast_horizon_end,
+                freq='MS'
+            )
+
+            monthly_agg = monthly_agg.reindex(full_index, fill_value=0.0)
+            monthly_agg.index.name = 'Date'
+
+            monthly_agg['Pipeline_Amount_Lag1'] = monthly_agg['Weighted_Pipeline_Amount'].shift(1)
+            monthly_agg['Pipeline_Amount_Lag3'] = monthly_agg['Weighted_Pipeline_Amount'].shift(3)
+            monthly_agg['Pipeline_Quantity_Lag1'] = monthly_agg['Weighted_Pipeline_Quantity'].shift(1)
+            monthly_agg['Pipeline_Quantity_Lag3'] = monthly_agg['Weighted_Pipeline_Quantity'].shift(3)
+
+            monthly_agg['Pipeline_Amount_MA3'] = monthly_agg['Weighted_Pipeline_Amount'].rolling(window=3, min_periods=1).mean()
+            monthly_agg['Pipeline_Quantity_MA3'] = monthly_agg['Weighted_Pipeline_Quantity'].rolling(window=3, min_periods=1).mean()
+
+            return monthly_agg.fillna(0.0).reset_index()
 
         for group_name, products in product_groups.items():
             print(f"Processing pipeline data for {group_name}")
@@ -101,37 +163,25 @@ class SalesforceIntegration:
             if missing_codes:
                 print(f"Partial Salesforce coverage for {group_name}; missing normalized codes: {sorted(missing_codes)}")
 
-            # Create monthly aggregations
-            group_pipeline['YearMonth'] = group_pipeline['CloseDate'].dt.to_period('M')
+            if self.forecast_by_bu and 'Business_Unit_Code' in group_pipeline.columns:
+                grouped = group_pipeline.groupby('Business_Unit_Code')
+                for bu_code, bu_slice in grouped:
+                    if pd.isna(bu_code) or bu_slice.empty:
+                        continue
+                    features_frame = build_feature_frame(bu_slice)
+                    if features_frame is None:
+                        continue
+                    processed[(group_name, bu_code)] = features_frame
+                    readable_bu = self.bu_code_to_name.get(bu_code, bu_code)
+                    print(f"  -> Features prepared for BU {bu_code} ({readable_bu}) with {len(features_frame)} rows")
+            else:
+                features_frame = build_feature_frame(group_pipeline)
+                if features_frame is None:
+                    continue
+                processed[group_name] = features_frame
 
-            monthly_agg = group_pipeline.groupby('YearMonth')[['Weighted_Pipeline_Amount', 'Weighted_Pipeline_Quantity']].sum()
-
-            monthly_agg.index = monthly_agg.index.to_timestamp(how='start')
-
-            full_index = pd.date_range(
-                start=monthly_agg.index.min(),
-                end=forecast_horizon_end,
-                freq='MS'
-            )
-
-            monthly_agg = monthly_agg.reindex(full_index, fill_value=0.0)
-            monthly_agg.index.name = 'Date'
-
-            # Create lagged features (pipeline often leads actual sales)
-            monthly_agg['Pipeline_Amount_Lag1'] = monthly_agg['Weighted_Pipeline_Amount'].shift(1)
-            monthly_agg['Pipeline_Amount_Lag3'] = monthly_agg['Weighted_Pipeline_Amount'].shift(3)
-            monthly_agg['Pipeline_Quantity_Lag1'] = monthly_agg['Weighted_Pipeline_Quantity'].shift(1)
-            monthly_agg['Pipeline_Quantity_Lag3'] = monthly_agg['Weighted_Pipeline_Quantity'].shift(3)
-
-            monthly_agg['Pipeline_Amount_MA3'] = monthly_agg['Weighted_Pipeline_Amount'].rolling(window=3, min_periods=1).mean()
-            monthly_agg['Pipeline_Quantity_MA3'] = monthly_agg['Weighted_Pipeline_Quantity'].rolling(window=3, min_periods=1).mean()
-
-            monthly_agg = monthly_agg.fillna(0.0).reset_index()
-
-            monthly_features[group_name] = monthly_agg
-
-        self.processed_features = monthly_features
-        return monthly_features
+        self.processed_features = processed
+        return processed
 
 
     def fit_sarima_with_exog(self, group_name, y_train, exog_train, sarima_params):
@@ -185,17 +235,20 @@ class SalesforceIntegration:
             print(f"Error generating forecast with external regressors: {e}")
             return None
 
-    def create_future_exog_features(self, group_name, forecast_start_date, forecast_months):
+    def create_future_exog_features(self, group_name, forecast_start_date, forecast_months, bu_code=None):
         """
         Create future external regressor features for forecasting
         """
-        if group_name not in self.processed_features:
+        key = (group_name, bu_code) if self.forecast_by_bu else group_name
+        if key not in self.processed_features:
             return None
 
-        features_df = self.processed_features[group_name].copy()
+        features_df = self.processed_features[key].copy()
+        readable_bu = self.bu_code_to_name.get(bu_code, bu_code) if bu_code else None
 
         if 'Date' not in features_df.columns:
-            print(f"Processed features for {group_name} missing 'Date' column; cannot create future features.")
+            label = f"{group_name} ({readable_bu})" if readable_bu else group_name
+            print(f"Processed features for {label} missing 'Date' column; cannot create future features.")
             return None
 
         features_df = features_df.set_index('Date').sort_index()
@@ -210,22 +263,27 @@ class SalesforceIntegration:
 
         if future_df.isnull().any().any():
             future_df = future_df.fillna(0.0)
-            print(f"Filled missing Salesforce feature values with zeros for {group_name} forecast horizon")
+            label = f"{group_name} ({readable_bu})" if readable_bu else group_name
+            print(f"Filled missing Salesforce feature values with zeros for {label} forecast horizon")
 
-        print(f"Created future external features for {group_name} using Salesforce pipeline data")
+        label = f"{group_name} ({readable_bu})" if readable_bu else group_name
+        print(f"Created future external features for {label} using Salesforce pipeline data")
 
         return future_df
 
 
-    def merge_with_actuals(self, actuals_data, group_name):
+    def merge_with_actuals(self, actuals_data, group_name, bu_code=None):
         """
         Merge Salesforce features with actual sales data for modeling
         """
-        if group_name not in self.processed_features:
-            print(f"No Salesforce features available for {group_name}")
+        key = (group_name, bu_code) if self.forecast_by_bu else group_name
+        label = f"{group_name} ({self.bu_code_to_name.get(bu_code, bu_code)})" if bu_code else group_name
+
+        if key not in self.processed_features:
+            print(f"No Salesforce features available for {label}")
             return actuals_data, None
 
-        features_df = self.processed_features[group_name]
+        features_df = self.processed_features[key]
 
         # Merge on date
         merged = pd.merge(
@@ -258,7 +316,7 @@ class SalesforceIntegration:
         actuals_series = merged['Actuals']
         features_df = merged[feature_columns]
 
-        print(f"Merged {len(features_df)} observations with Salesforce features for {group_name}")
+        print(f"Merged {len(features_df)} observations with Salesforce features for {label}")
 
         return actuals_series, features_df
 
@@ -300,7 +358,7 @@ class EnhancedSARIMAForecaster:
         if self.use_salesforce and self.salesforce_integration:
             # Merge with Salesforce features
             y_series, exog_features = self.salesforce_integration.merge_with_actuals(
-                actuals_data, group_name
+                actuals_data, group_name, None
             )
 
             if exog_features is not None and not exog_features.empty:

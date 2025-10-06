@@ -37,6 +37,7 @@ class SARIMAForecaster:
         self.metrics = {}
         self.model_strategy = {}
         self.combined_data = {}
+        self.series_metadata = {}
         self.salesforce_integration = None
 
         if self.config.USE_SALESFORCE and getattr(self.config, "SALESFORCE_DATA_FILE", None):
@@ -53,6 +54,25 @@ class SARIMAForecaster:
         if self.config.OUTPUT_PLOTS and not os.path.exists(self.config.PLOTS_DIR):
             os.makedirs(self.config.PLOTS_DIR)
 
+    def _make_series_key(self, group_name, bu_code=None):
+        """Create a unique key for a product group / BU combination."""
+        if bu_code:
+            return f"{group_name}__{bu_code}"
+        return group_name
+
+    def _format_series_label(self, group_name, bu_code=None):
+        """Human friendly label for logs and plots."""
+        if bu_code and getattr(self.config, "FORECAST_BY_BU", False):
+            bu_name = getattr(self.config, "BU_CODE_TO_NAME", {}).get(bu_code, bu_code)
+            return f"{group_name} ({bu_name})"
+        return group_name
+
+    @staticmethod
+    def _sanitize_label(label):
+        """Sanitize label for filesystem use."""
+        allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+        return "".join(c if c in allowed else "_" for c in label)
+
     def load_and_preprocess_data(self):
         """Load data and combine product groups according to replacement logic"""
         print("Loading and preprocessing data...")
@@ -62,21 +82,48 @@ class SARIMAForecaster:
         self.data['Month'] = pd.to_datetime(self.data['Month'])
         self.data = self.data.sort_values(['Product', 'Month'])
 
-        # Combine product groups
+        self.combined_data = {}
+        self.series_metadata = {}
+
+        forecast_by_bu = bool(getattr(self.config, "FORECAST_BY_BU", False))
+        if forecast_by_bu and 'BU' not in self.data.columns:
+            raise ValueError("FORECAST_BY_BU is enabled but the source data is missing the 'BU' column.")
+
         for group_name, products in self.config.PRODUCT_GROUPS.items():
             print(f"Combining products for {group_name}: {products}")
 
-            # Get data for all products in this group
             group_data = self.data[self.data['Product'].isin(products)].copy()
+            if group_data.empty:
+                print(f"Warning: No records found for {group_name} using products {products}")
+                continue
 
-            # Aggregate by month (sum actuals across products)
-            combined = group_data.groupby('Month')['Actuals'].sum().reset_index()
-            combined['Product_Group'] = group_name
+            if forecast_by_bu:
+                for bu_code, bu_slice in group_data.groupby('BU'):
+                    if bu_slice.empty:
+                        continue
+                    combined = bu_slice.groupby('Month')['Actuals'].sum().reset_index()
+                    combined['Product_Group'] = group_name
+                    combined['BU'] = bu_code
 
-            # Store combined data
-            self.combined_data[group_name] = combined
+                    key = self._make_series_key(group_name, bu_code)
+                    self.combined_data[key] = combined
+                    self.series_metadata[key] = {
+                        'group': group_name,
+                        'bu_code': bu_code
+                    }
+                    print(f"  -> Added BU {bu_code} with {len(combined)} observations")
+            else:
+                combined = group_data.groupby('Month')['Actuals'].sum().reset_index()
+                combined['Product_Group'] = group_name
 
-        print(f"Successfully combined {len(self.combined_data)} product groups")
+                key = self._make_series_key(group_name)
+                self.combined_data[key] = combined
+                self.series_metadata[key] = {
+                    'group': group_name,
+                    'bu_code': None
+                }
+
+        print(f"Successfully prepared {len(self.combined_data)} product series")
         return self.combined_data
 
     def get_salesforce_feature_mode(self, group_name):
@@ -133,12 +180,13 @@ class SARIMAForecaster:
 
         return features_df
 
-    def analyze_seasonality(self, series, group_name):
+    def analyze_seasonality(self, series, group_name, bu_code=None):
         """Analyze seasonality patterns in the data"""
-        print(f"Analyzing seasonality for {group_name}...")
+        label = self._format_series_label(group_name, bu_code)
+        print(f"Analyzing seasonality for {label}...")
 
         if len(series) < self.config.MIN_OBSERVATIONS:
-            print(f"Warning: {group_name} has insufficient data for reliable seasonal analysis")
+            print(f"Warning: {label} has insufficient data for reliable seasonal analysis")
             return False
 
         try:
@@ -151,34 +199,36 @@ class SARIMAForecaster:
 
             if residual_var > 0:
                 seasonal_strength = seasonal_var / (seasonal_var + residual_var)
-                print(f"Seasonal strength for {group_name}: {seasonal_strength:.3f}")
+                print(f"Seasonal strength for {label}: {seasonal_strength:.3f}")
 
                 # Plot decomposition if enabled
                 if self.config.OUTPUT_PLOTS:
                     fig, axes = plt.subplots(4, 1, figsize=(12, 10))
-                    decomposition.observed.plot(ax=axes[0], title=f'{group_name} - Original')
+                    decomposition.observed.plot(ax=axes[0], title=f'{label} - Original')
                     decomposition.trend.plot(ax=axes[1], title='Trend')
                     decomposition.seasonal.plot(ax=axes[2], title='Seasonal')
                     decomposition.resid.plot(ax=axes[3], title='Residual')
                     plt.tight_layout()
-                    plt.savefig(f'{self.config.PLOTS_DIR}/{group_name}_decomposition.png')
+                    file_stem = self._sanitize_label(label)
+                    plt.savefig(f'{self.config.PLOTS_DIR}/{file_stem}_decomposition.png')
                     plt.close()
 
                 return seasonal_strength > self.config.SEASONALITY_THRESHOLD
 
         except Exception as e:
-            print(f"Error in seasonal analysis for {group_name}: {e}")
+            print(f"Error in seasonal analysis for {label}: {e}")
 
         return False
 
-    def check_stationarity(self, series, group_name):
+    def check_stationarity(self, series, group_name, bu_code=None):
         """Check if series is stationary using Augmented Dickey-Fuller test"""
         result = adfuller(series.dropna())
         p_value = result[1]
 
-        print(f"Stationarity test for {group_name}: p-value = {p_value:.4f}")
+        label = self._format_series_label(group_name, bu_code)
+        print(f"Stationarity test for {label}: p-value = {p_value:.4f}")
         is_stationary = p_value < 0.05
-        print(f"{group_name} is {'stationary' if is_stationary else 'non-stationary'}")
+        print(f"{label} is {'stationary' if is_stationary else 'non-stationary'}")
 
         return is_stationary
 
@@ -189,9 +239,10 @@ class SARIMAForecaster:
         test = series.iloc[split_point:]
         return train, test
 
-    def fit_sarima_model(self, group_name, train_data, exog_train=None):
+    def fit_sarima_model(self, group_name, train_data, exog_train=None, label=None):
         """Fit SARIMA model for a product group"""
-        print(f"Fitting SARIMA model for {group_name}...")
+        display_name = label or group_name
+        print(f"Fitting SARIMA model for {display_name}...")
 
         # Get SARIMA parameters for this group
         params = self.config.SARIMA_PARAMS.get(group_name, (1, 1, 1, 1, 1, 1, 12))
@@ -212,17 +263,17 @@ class SARIMAForecaster:
                 order=(p, d, q),
                 seasonal_order=(P, D, Q, s),
                 enforce_stationarity=False,
-                enforce_invertibility=False
+                enforce_invertibility=True
             )
 
             fitted_model = model.fit(disp=False)
-            print(f"Model fitted successfully for {group_name}")
+            print(f"Model fitted successfully for {display_name}")
             print(f"AIC: {fitted_model.aic:.2f}")
 
             return fitted_model
 
         except Exception as e:
-            print(f"Error fitting model for {group_name}: {e}")
+            print(f"Error fitting model for {display_name}: {e}")
             print("Trying simpler ARIMA model...")
             try:
                 fallback_model = SARIMAX(
@@ -230,13 +281,13 @@ class SARIMAForecaster:
                     exog=exog_train,
                     order=(1, 1, 1),
                     enforce_stationarity=False,
-                    enforce_invertibility=False
+                    enforce_invertibility=True
                 )
                 fitted_model = fallback_model.fit(disp=False)
-                print(f"Fallback model fitted for {group_name}")
+                print(f"Fallback model fitted for {display_name}")
                 return fitted_model
             except Exception as e2:
-                print(f"Fallback model also failed for {group_name}: {e2}")
+                print(f"Fallback model also failed for {display_name}: {e2}")
                 return None
 
     def should_use_short_series_arima(self, series, group_name):
@@ -311,8 +362,9 @@ class SARIMAForecaster:
 
         return getattr(self.config, "SHORT_SERIES_ARIMA_DEFAULT_ORDER", (1, 1, 1))
 
-    def fit_theta_ets_model(self, group_name, train_data):
+    def fit_theta_ets_model(self, group_name, train_data, label=None):
         """Fit an ETS/Theta blend model for very short history groups."""
+        display_name = label or group_name
         weights = getattr(self.config, "ETS_THETA_WEIGHTS", (0.5, 0.5))
         if (not isinstance(weights, (list, tuple))) or len(weights) != 2:
             weights = (0.5, 0.5)
@@ -332,7 +384,7 @@ class SARIMAForecaster:
             theta_model = ThetaModel(train_data, period=theta_period)
             theta_result = theta_model.fit()
         except Exception as exc:
-            print(f"Warning: ThetaModel failed for {group_name}: {exc}")
+            print(f"Warning: ThetaModel failed for {display_name}: {exc}")
 
         ets_result = None
         trend = getattr(self.config, "ETS_THETA_TREND", 'add')
@@ -345,7 +397,7 @@ class SARIMAForecaster:
         if seasonal is not None and seasonal_periods is None:
             seasonal_periods = theta_period
         if seasonal_periods is not None and seasonal_periods > len(train_data):
-            print(f"Warning: Not enough data for seasonal ETS component on {group_name}; disabling seasonality.")
+            print(f"Warning: Not enough data for seasonal ETS component on {display_name}; disabling seasonality.")
             seasonal = None
             seasonal_periods = None
         damped = bool(getattr(self.config, "ETS_THETA_DAMPED", False))
@@ -361,10 +413,10 @@ class SARIMAForecaster:
             )
             ets_result = ets_model.fit(optimized=True)
         except Exception as exc:
-            print(f"Warning: ETS component failed for {group_name}: {exc}")
+            print(f"Warning: ETS component failed for {display_name}: {exc}")
 
         if theta_result is None and ets_result is None:
-            print(f"Error: Unable to fit ETS/Theta blend for {group_name}.")
+            print(f"Error: Unable to fit ETS/Theta blend for {display_name}.")
             return None
 
         if theta_result is None:
@@ -387,10 +439,11 @@ class SARIMAForecaster:
             'resid_std': resid_std
         }
 
-    def fit_arima_model(self, group_name, train_data, exog_train=None):
+    def fit_arima_model(self, group_name, train_data, exog_train=None, label=None):
         """Fit a non-seasonal ARIMA model for short-history product groups."""
         order = self.get_short_series_arima_order(group_name)
-        print(f"Using short-history ARIMA{order} for {group_name} (no seasonal component)")
+        display_name = label or group_name
+        print(f"Using short-history ARIMA{order} for {display_name} (no seasonal component)")
 
         if exog_train is not None and exog_train.empty:
             exog_train = None
@@ -405,16 +458,16 @@ class SARIMAForecaster:
                 order=order,
                 seasonal_order=(0, 0, 0, 0),
                 enforce_stationarity=False,
-                enforce_invertibility=False
+                enforce_invertibility=True
             )
 
             fitted_model = model.fit(disp=False)
-            print(f"Short-history ARIMA fitted successfully for {group_name}")
+            print(f"Short-history ARIMA fitted successfully for {display_name}")
             print(f"AIC: {fitted_model.aic:.2f}")
             return fitted_model
 
         except Exception as exc:
-            print(f"Error fitting ARIMA fallback for {group_name}: {exc}")
+            print(f"Error fitting ARIMA fallback for {display_name}: {exc}")
             return None
 
     def calculate_metrics(self, actual, predicted, group_name):
@@ -441,10 +494,12 @@ class SARIMAForecaster:
 
         return {"bias_percent": bias_percent, "mae": mae}
 
-    def forecast_theta_ets(self, model_bundle, steps, start_index, group_name):
+    def forecast_theta_ets(self, model_bundle, steps, start_index, group_name, bu_code=None, label=None):
         """Generate forecasts and confidence intervals for the ETS/Theta blend."""
         if model_bundle is None or steps <= 0:
             return None
+
+        display_name = label or self._format_series_label(group_name, bu_code)
 
         forecast_index = pd.date_range(
             start=start_index + pd.DateOffset(months=1),
@@ -481,7 +536,7 @@ class SARIMAForecaster:
                 lower = theta_lower + adjustment
                 upper = theta_upper + adjustment
             except Exception as exc:
-                print(f"Warning: Theta intervals unavailable for {group_name}: {exc}")
+                print(f"Warning: Theta intervals unavailable for {display_name}: {exc}")
 
         if lower is None or upper is None:
             resid_std = model_bundle.get('resid_std')
@@ -529,7 +584,7 @@ class SARIMAForecaster:
             print(f"Error generating forecast for {group_name}: {e}")
             return None
 
-    def plot_results(self, group_name, historical_data, test_data, forecast_data):
+    def plot_results(self, series_key, label, historical_data, test_data, forecast_data):
         """Plot historical data, test predictions, and forecasts"""
         if not self.config.OUTPUT_PLOTS:
             return
@@ -562,15 +617,16 @@ class SARIMAForecaster:
                            forecast_data['conf_int_upper'],
                            alpha=0.3, color='red', label=f'{int(self.config.CONFIDENCE_LEVEL*100)}% Confidence Interval')
 
-        model_label = self.model_strategy.get(group_name, 'SARIMA')
-        plt.title(f'{group_name} - {model_label} Forecast')
+        model_label = self.model_strategy.get(series_key, 'SARIMA')
+        plt.title(f'{label} - {model_label} Forecast')
         plt.xlabel('Date')
         plt.ylabel('Demand')
         plt.legend()
         plt.grid(True, alpha=0.3)
         plt.xticks(rotation=45)
         plt.tight_layout()
-        plt.savefig(f'{self.config.PLOTS_DIR}/{group_name}_forecast.png', dpi=300, bbox_inches='tight')
+        file_stem = self._sanitize_label(label)
+        plt.savefig(f'{self.config.PLOTS_DIR}/{file_stem}_forecast.png', dpi=300, bbox_inches='tight')
         plt.close()
 
     def run_forecasting(self):
@@ -584,8 +640,13 @@ class SARIMAForecaster:
         results_summary = []
 
         # Process each product group
-        for group_name, group_data in self.combined_data.items():
-            print(f"\nProcessing {group_name}...")
+        for series_key, group_data in self.combined_data.items():
+            metadata = self.series_metadata.get(series_key, {})
+            group_name = metadata.get('group', series_key)
+            bu_code = metadata.get('bu_code')
+            label = self._format_series_label(group_name, bu_code)
+
+            print(f"\nProcessing {label}...")
             print("-" * 30)
 
             # Prepare time series
@@ -597,11 +658,11 @@ class SARIMAForecaster:
             ts_data = ts_data[ts_data > 0]  # Remove zero values at the end
 
             if len(ts_data) < 12:
-                print(f"Warning: {group_name} has insufficient data. Skipping...")
+                print(f"Warning: {label} has insufficient data. Skipping...")
                 continue
 
             strategy = self.determine_model_strategy(ts_data, group_name)
-            print(f"Selected {strategy} strategy for {group_name} (history={len(ts_data)} months)")
+            print(f"Selected {strategy} strategy for {label} (history={len(ts_data)} months)")
 
             forecast_start = ts_data.index[-1] + pd.DateOffset(months=1)
 
@@ -611,7 +672,7 @@ class SARIMAForecaster:
             if strategy != 'ETS_THETA' and self.salesforce_integration:
                 actuals_with_index = ts_data.to_frame(name='Actuals')
                 y_series, features = self.salesforce_integration.merge_with_actuals(
-                    actuals_with_index, group_name
+                    actuals_with_index, group_name, bu_code
                 )
 
                 features = self.filter_salesforce_features(features, group_name) if features is not None else None
@@ -620,7 +681,8 @@ class SARIMAForecaster:
                     potential_future = self.salesforce_integration.create_future_exog_features(
                         group_name,
                         forecast_start,
-                        self.config.FORECAST_MONTHS
+                        self.config.FORECAST_MONTHS,
+                        bu_code
                     )
 
                     if potential_future is not None and not potential_future.empty:
@@ -631,23 +693,23 @@ class SARIMAForecaster:
                             exog_future = potential_future.astype(float).fillna(0.0)
                             ts_data = y_series.astype(float)
                         else:
-                            print(f"Filtered Salesforce features lack future coverage for {group_name}; proceeding without exogenous inputs.")
+                            print(f"Filtered Salesforce features lack future coverage for {label}; proceeding without exogenous inputs.")
                     else:
-                        print(f"Salesforce features lack future coverage for {group_name}; proceeding without exogenous inputs.")
+                        print(f"Salesforce features lack future coverage for {label}; proceeding without exogenous inputs.")
                 else:
-                    print(f"Salesforce features unavailable or filtered out for {group_name}; proceeding without exogenous inputs.")
+                    print(f"Salesforce features unavailable or filtered out for {label}; proceeding without exogenous inputs.")
 
             if exog_features is not None and (exog_future is None or exog_future.empty):
-                print(f"Salesforce features missing forecast horizon coverage for {group_name}; proceeding without exogenous inputs.")
+                print(f"Salesforce features missing forecast horizon coverage for {label}; proceeding without exogenous inputs.")
                 exog_features = None
                 exog_future = None
 
             if strategy == 'SARIMA':
                 # Analyze seasonality
-                self.analyze_seasonality(ts_data, group_name)
+                self.analyze_seasonality(ts_data, group_name, bu_code)
 
                 # Check stationarity
-                self.check_stationarity(ts_data, group_name)
+                self.check_stationarity(ts_data, group_name, bu_code)
             else:
                 print('Skipping detailed seasonality diagnostics for non-SARIMA strategy.')
 
@@ -657,7 +719,7 @@ class SARIMAForecaster:
             if strategy != 'ETS_THETA' and exog_features is not None:
                 split_point = len(ts_data) - self.config.TEST_SPLIT_MONTHS
                 if split_point <= 0:
-                    print(f"Warning: Not enough observations after holdout for {group_name}. Skipping...")
+                    print(f"Warning: Not enough observations after holdout for {label}. Skipping...")
                     continue
 
                 train_data = ts_data.iloc[:split_point]
@@ -678,28 +740,28 @@ class SARIMAForecaster:
                 train_data, test_data = self.split_data(ts_data)
 
             if len(train_data) == 0:
-                print(f"Warning: {group_name} has no training data after split. Skipping...")
+                print(f"Warning: {label} has no training data after split. Skipping...")
                 continue
 
             if strategy == 'SARIMA':
-                model = self.fit_sarima_model(group_name, train_data, exog_train)
+                model = self.fit_sarima_model(group_name, train_data, exog_train, label)
             elif strategy == 'ARIMA':
-                model = self.fit_arima_model(group_name, train_data, exog_train)
+                model = self.fit_arima_model(group_name, train_data, exog_train, label)
             else:
-                model = self.fit_theta_ets_model(group_name, train_data)
+                model = self.fit_theta_ets_model(group_name, train_data, label)
 
             if model is None:
-                print(f'Unable to fit model for {group_name}; skipping forecast.')
+                print(f'Unable to fit model for {label}; skipping forecast.')
                 continue
 
-            self.models[group_name] = model
-            self.model_strategy[group_name] = strategy
+            self.models[series_key] = model
+            self.model_strategy[series_key] = strategy
 
             if len(test_data) > 0:
                 if strategy == 'ETS_THETA':
-                    test_result = self.forecast_theta_ets(model, len(test_data), train_data.index[-1], group_name)
+                    test_result = self.forecast_theta_ets(model, len(test_data), train_data.index[-1], group_name, bu_code, label)
                     if test_result is None:
-                        print(f"Unable to generate test forecast for {group_name}.")
+                        print(f"Unable to generate test forecast for {label}.")
                         continue
                     test_predictions = test_result['forecast']
                 elif exog_test is not None and not exog_test.empty:
@@ -712,24 +774,24 @@ class SARIMAForecaster:
                     test_forecast = model.get_forecast(steps=len(test_data))
                     test_predictions = test_forecast.predicted_mean
 
-                self.metrics[group_name] = self.calculate_metrics(
+                self.metrics[series_key] = self.calculate_metrics(
                     test_data.values,
                     test_predictions.values if hasattr(test_predictions, 'values') else np.asarray(test_predictions),
-                    group_name
+                    label
                 )
 
             if strategy == 'ETS_THETA':
-                forecast = self.forecast_theta_ets(model, self.config.FORECAST_MONTHS, ts_data.index[-1], group_name)
+                forecast = self.forecast_theta_ets(model, self.config.FORECAST_MONTHS, ts_data.index[-1], group_name, bu_code, label)
             else:
                 forecast = self.generate_forecast(
                     model,
                     self.config.FORECAST_MONTHS,
-                    group_name,
+                    label,
                     exog_future
                 )
 
             if forecast:
-                self.forecasts[group_name] = forecast
+                self.forecasts[series_key] = forecast
 
                 forecast_dates = pd.date_range(
                     start=forecast_start,
@@ -740,13 +802,15 @@ class SARIMAForecaster:
                 for i, date in enumerate(forecast_dates):
                     results_summary.append({
                         'Product_Group': group_name,
-                        'Model_Type': self.model_strategy.get(group_name, 'SARIMA'),
+                        'BU': bu_code if bu_code else '',
+                        'BU_Name': getattr(self.config, "BU_CODE_TO_NAME", {}).get(bu_code, '') if bu_code else '',
+                        'Model_Type': self.model_strategy.get(series_key, 'SARIMA'),
                         'Date': date.strftime('%Y-%m'),
                         'Forecast': round(forecast['forecast'].iloc[i], 0),
                         'Lower_CI': round(forecast['conf_int_lower'].iloc[i], 0),
                         'Upper_CI': round(forecast['conf_int_upper'].iloc[i], 0)
                     })
-            self.plot_results(group_name, train_data, test_data, forecast)
+            self.plot_results(series_key, label, train_data, test_data, forecast)
 
         if self.config.SAVE_RESULTS and results_summary:
             results_df = pd.DataFrame(results_summary)
@@ -766,17 +830,25 @@ class SARIMAForecaster:
         print(f"Models fitted: {len(self.models)}")
         print(f"Forecasts generated: {len(self.forecasts)}")
 
+        def label_for(key):
+            meta = self.series_metadata.get(key, {})
+            group = meta.get('group', key)
+            bu_code = meta.get('bu_code')
+            return self._format_series_label(group, bu_code)
+
         if self.metrics:
             print("\nModel Performance Metrics:")
             print("-" * 25)
-            for group, metrics in self.metrics.items():
-                print(f"{group}: MAE={metrics['mae']:.2f}, Bias%={metrics['bias_percent']:.2f}%")
+            for key, metrics in self.metrics.items():
+                label = label_for(key)
+                print(f"{label}: MAE={metrics['mae']:.2f}, Bias%={metrics['bias_percent']:.2f}%")
 
         if self.forecasts:
             print("\nNext 12-month forecasts generated for:")
-            for group in self.forecasts.keys():
-                model_used = self.model_strategy.get(group, 'SARIMA')
-                print(f"  - {group} ({model_used})")
+            for key in self.forecasts.keys():
+                label = label_for(key)
+                model_used = self.model_strategy.get(key, 'SARIMA')
+                print(f"  - {label} ({model_used})")
 
 
         print(f"\nPlots saved to: {self.config.PLOTS_DIR}/")
