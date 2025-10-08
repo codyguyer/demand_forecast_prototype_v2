@@ -9,9 +9,11 @@ class SARIMAConfig:
     # Data configuration
     DATA_FILE = "Actuals.csv"
     FORECAST_MONTHS = 12
-    CURRENT_MONTH = "2025-09"  # Update this based on current date
+    CURRENT_MONTH = "2025-09"  # Use last fully completed month
     USE_SALESFORCE = False
     SALESFORCE_DATA_FILE = "salesforce_data.csv"
+    USE_BACKLOG = True
+    BACKLOG_DATA_FILE = "Backlog.csv"
     FORECAST_BY_BU = True
     BUSINESS_UNITS = ("D100", "D200", "D300")
     BU_CODE_TO_NAME = {
@@ -99,6 +101,14 @@ class SARIMAConfig:
         "250": "quantity",
         "253": "quantity"
     }
+
+    # Backlog feature controls
+    BACKLOG_FEATURES = [
+        # "Backlog",
+        # "Backlog_Lag1",
+        "Backlog_Lag3",
+        "Backlog_MA3"
+    ]
 
     ENFORCE_NON_NEGATIVE_FORECASTS = True
 

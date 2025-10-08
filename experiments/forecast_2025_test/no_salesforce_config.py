@@ -12,6 +12,8 @@ class Experiment2025NoSFConfig(SARIMAConfig):
     RESULTS_FILE = "experiments/forecast_2025_test/results_2025_experiment_no_sf.csv"
     PLOTS_DIR = "experiments/forecast_2025_test/plots_no_sf"
     USE_SALESFORCE = False
+    USE_BACKLOG = True
+    BACKLOG_DATA_FILE = "experiments/forecast_2025_test/Backlog_2022_2024.csv"
     SAVE_RESULTS = True
     OUTPUT_PLOTS = True
     TEST_SPLIT_MONTHS = 6

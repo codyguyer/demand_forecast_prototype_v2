@@ -18,11 +18,11 @@ from statsmodels.tsa.stattools import adfuller
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.tsa.forecasting.theta import ThetaModel
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
-from sklearn.metrics import mean_absolute_error
 import os
 
 from config import SARIMAConfig
 from salesforce_integration import SalesforceIntegration
+from backlog_integration import BacklogIntegration
 
 class SARIMAForecaster:
     """
@@ -39,6 +39,7 @@ class SARIMAForecaster:
         self.combined_data = {}
         self.series_metadata = {}
         self.salesforce_integration = None
+        self.backlog_integration = None
 
         if self.config.USE_SALESFORCE and getattr(self.config, "SALESFORCE_DATA_FILE", None):
             try:
@@ -49,6 +50,16 @@ class SARIMAForecaster:
             except Exception as exc:
                 print(f"Warning: Unable to initialize Salesforce integration: {exc}")
                 self.salesforce_integration = None
+
+        if getattr(self.config, "USE_BACKLOG", False) and getattr(self.config, "BACKLOG_DATA_FILE", None):
+            try:
+                self.backlog_integration = BacklogIntegration(self.config)
+                self.backlog_integration.load_backlog_data(self.config.BACKLOG_DATA_FILE)
+                self.backlog_integration.process_backlog_features(self.config.PRODUCT_GROUPS)
+                print("Backlog features loaded for exogenous modeling")
+            except Exception as exc:
+                print(f"Warning: Unable to initialize backlog integration: {exc}")
+                self.backlog_integration = None
 
         # Create output directory if needed
         if self.config.OUTPUT_PLOTS and not os.path.exists(self.config.PLOTS_DIR):
@@ -179,6 +190,42 @@ class SARIMAForecaster:
             return features_df[amount_columns]
 
         return features_df
+
+    def filter_backlog_features(self, features_df):
+        """Filter backlog features based on configuration."""
+        if features_df is None or features_df.empty:
+            return None
+
+        configured_columns = getattr(self.config, "BACKLOG_FEATURES", None)
+        if configured_columns:
+            features_df = features_df.copy()
+            missing = [col for col in configured_columns if col not in features_df.columns]
+
+            if missing:
+                for col in missing:
+                    features_df[col] = 0.0
+
+            return features_df[configured_columns]
+
+        return features_df
+
+    @staticmethod
+    def combine_exogenous_features(feature_frames, index=None):
+        """Combine multiple exogenous feature dataframes."""
+        valid_frames = [
+            frame for frame in feature_frames
+            if frame is not None and not frame.empty
+        ]
+
+        if not valid_frames:
+            return None
+
+        combined = pd.concat(valid_frames, axis=1)
+
+        if index is not None:
+            combined = combined.reindex(index, fill_value=0.0)
+
+        return combined.fillna(0.0)
 
     def analyze_seasonality(self, series, group_name, bu_code=None):
         """Analyze seasonality patterns in the data"""
@@ -471,17 +518,14 @@ class SARIMAForecaster:
             return None
 
     def calculate_metrics(self, actual, predicted, group_name):
-        """Calculate bias% and MAE metrics"""
+        """Calculate bias% and MAE% metrics"""
         # Remove any NaN values
         mask = ~(np.isnan(actual) | np.isnan(predicted))
         actual_clean = actual[mask]
         predicted_clean = predicted[mask]
 
         if len(actual_clean) == 0:
-            return {"bias_percent": np.nan, "mae": np.nan}
-
-        # Mean Absolute Error
-        mae = mean_absolute_error(actual_clean, predicted_clean)
+            return {"bias_percent": np.nan, "mae_percent": np.nan}
 
         # Bias percentage
         mean_actual = np.mean(actual_clean)
@@ -490,9 +534,17 @@ class SARIMAForecaster:
         else:
             bias_percent = np.nan
 
-        print(f"{group_name} - MAE: {mae:.2f}, Bias%: {bias_percent:.2f}%")
+        # MAE% defined as total absolute error divided by total actual demand
+        total_actual = np.sum(np.abs(actual_clean))
+        if total_actual == 0:
+            mae_percent = np.nan
+        else:
+            total_abs_error = np.sum(np.abs(predicted_clean - actual_clean))
+            mae_percent = (total_abs_error / total_actual) * 100
 
-        return {"bias_percent": bias_percent, "mae": mae}
+        print(f"{group_name} - MAE%: {mae_percent:.2f}%, Bias%: {bias_percent:.2f}%")
+
+        return {"bias_percent": bias_percent, "mae_percent": mae_percent}
 
     def forecast_theta_ets(self, model_bundle, steps, start_index, group_name, bu_code=None, label=None):
         """Generate forecasts and confidence intervals for the ETS/Theta blend."""
@@ -669,40 +721,70 @@ class SARIMAForecaster:
             exog_features = None
             exog_future = None
 
-            if strategy != 'ETS_THETA' and self.salesforce_integration:
-                actuals_with_index = ts_data.to_frame(name='Actuals')
-                y_series, features = self.salesforce_integration.merge_with_actuals(
-                    actuals_with_index, group_name, bu_code
-                )
+            exog_feature_frames = []
+            exog_future_frames = []
+            adjusted_series = ts_data
 
-                features = self.filter_salesforce_features(features, group_name) if features is not None else None
+            exog_sources = []
+            if self.salesforce_integration:
+                exog_sources.append(("Salesforce", self.salesforce_integration))
+            if self.backlog_integration:
+                exog_sources.append(("Backlog", self.backlog_integration))
 
-                if features is not None and not features.empty:
-                    potential_future = self.salesforce_integration.create_future_exog_features(
-                        group_name,
-                        forecast_start,
-                        self.config.FORECAST_MONTHS,
-                        bu_code
-                    )
+            if strategy != 'ETS_THETA' and exog_sources:
+                for source_name, integration in exog_sources:
+                    actuals_with_index = adjusted_series.to_frame(name='Actuals')
+                    try:
+                        merged_series, features = integration.merge_with_actuals(
+                            actuals_with_index, group_name, bu_code
+                        )
+                    except Exception as exc:
+                        print(f"Warning: Unable to merge {source_name.lower()} features for {label}: {exc}")
+                        continue
 
-                    if potential_future is not None and not potential_future.empty:
-                        potential_future = self.filter_salesforce_features(potential_future, group_name)
+                    if source_name == "Salesforce":
+                        features = self.filter_salesforce_features(features, group_name) if features is not None else None
+                    else:
+                        features = self.filter_backlog_features(features) if features is not None else None
+
+                    if features is not None and not features.empty:
+                        potential_future = integration.create_future_exog_features(
+                            group_name,
+                            forecast_start,
+                            self.config.FORECAST_MONTHS,
+                            bu_code
+                        )
+
+                        if source_name == "Salesforce":
+                            potential_future = self.filter_salesforce_features(potential_future, group_name) if potential_future is not None else None
+                        else:
+                            potential_future = self.filter_backlog_features(potential_future) if potential_future is not None else None
+
                         if potential_future is not None and not potential_future.empty:
                             potential_future = potential_future.reindex(columns=features.columns, fill_value=0.0)
-                            exog_features = features.astype(float)
-                            exog_future = potential_future.astype(float).fillna(0.0)
-                            ts_data = y_series.astype(float)
+                            exog_feature_frames.append(features.astype(float))
+                            exog_future_frames.append(potential_future.astype(float).fillna(0.0))
+                            adjusted_series = merged_series.astype(float)
                         else:
-                            print(f"Filtered Salesforce features lack future coverage for {label}; proceeding without exogenous inputs.")
+                            print(f"{source_name} features lack future coverage for {label}; excluding this source.")
                     else:
-                        print(f"Salesforce features lack future coverage for {label}; proceeding without exogenous inputs.")
-                else:
-                    print(f"Salesforce features unavailable or filtered out for {label}; proceeding without exogenous inputs.")
+                        print(f"{source_name} features unavailable or filtered out for {label}; excluding this source.")
 
-            if exog_features is not None and (exog_future is None or exog_future.empty):
-                print(f"Salesforce features missing forecast horizon coverage for {label}; proceeding without exogenous inputs.")
-                exog_features = None
-                exog_future = None
+                if exog_feature_frames:
+                    exog_features = self.combine_exogenous_features(exog_feature_frames, index=ts_data.index)
+                    exog_future = self.combine_exogenous_features(exog_future_frames)
+
+                    if exog_features is not None and exog_future is not None:
+                        missing_cols = [col for col in exog_features.columns if col not in exog_future.columns]
+                        for col in missing_cols:
+                            exog_future[col] = 0.0
+                        exog_future = exog_future[exog_features.columns]
+
+                    if exog_features is not None and (exog_future is None or exog_future.empty):
+                        print(f"Exogenous features missing forecast horizon coverage for {label}; proceeding without exogenous inputs.")
+                        exog_features = None
+                        exog_future = None
+                ts_data = adjusted_series.astype(float)
 
             if strategy == 'SARIMA':
                 # Analyze seasonality
@@ -841,7 +923,7 @@ class SARIMAForecaster:
             print("-" * 25)
             for key, metrics in self.metrics.items():
                 label = label_for(key)
-                print(f"{label}: MAE={metrics['mae']:.2f}, Bias%={metrics['bias_percent']:.2f}%")
+                print(f"{label}: MAE%={metrics['mae_percent']:.2f}%, Bias%={metrics['bias_percent']:.2f}%")
 
         if self.forecasts:
             print("\nNext 12-month forecasts generated for:")

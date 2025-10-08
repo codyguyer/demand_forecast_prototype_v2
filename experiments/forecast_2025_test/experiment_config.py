@@ -13,6 +13,8 @@ class Experiment2025Config(SARIMAConfig):
     PLOTS_DIR = "experiments/forecast_2025_test/plots"
     USE_SALESFORCE = True
     SALESFORCE_DATA_FILE = "experiments/forecast_2025_test/salesforce_2022_2024.csv"
+    USE_BACKLOG = True
+    BACKLOG_DATA_FILE = "experiments/forecast_2025_test/Backlog_2022_2024.csv"
     SAVE_RESULTS = True
     OUTPUT_PLOTS = True
     TEST_SPLIT_MONTHS = 6
