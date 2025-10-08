@@ -47,16 +47,16 @@ class SARIMAConfig:
     # P,D,Q: seasonal AR, differencing, MA order
     # s: seasonal period (12 for monthly data with annual seasonality)
     SARIMA_PARAMS = {
-        "M11_dental": (0, 0, 1, 0, 1, 1, 12),
-        "M11_vet": (1, 1, 1, 1, 1, 1, 12),
-        "M9_dental": (0, 1, 1, 0, 0, 1, 12),
-        "M9_vet": (1, 1, 1, 0, 1, 1, 12),
-        "204": (0, 1, 1, 0, 1, 1, 12),
-        "224": (1, 1, 1, 1, 1, 0, 12),
-        "ECG": (2, 1, 2, 0, 1, 1, 12),
-        "Digital_Vital_Signs": (0, 1, 2, 0, 1, 1, 12),
-        "250": (1, 1, 1, 1, 1, 1, 12),
-        "253": (0, 0, 1, 0, 1, 1, 12)
+        "M11_dental": (1, 0, 1, 1, 0, 0, 12),
+        "M11_vet": (1, 0, 1, 0, 0, 0, 12),
+        "M9_dental": (0, 0, 1, 1, 0, 0, 12),
+        "M9_vet": (1, 0, 1, 0, 0, 0, 12),
+        "204": (1, 1, 1, 0, 0, 0, 12),
+        "224": (0, 1, 1, 0, 0, 0, 12),
+        "ECG": (1, 0, 1, 1, 0, 0, 12),
+        "Digital_Vital_Signs": (0, 0, 1, 0, 1, 0, 12),
+        "250": (1, 1, 1, 0, 1, 0, 12),
+        "253": (1, 1, 0, 1, 0, 0, 12)
     }
 
     # Model evaluation parameters
@@ -104,8 +104,8 @@ class SARIMAConfig:
 
     # Backlog feature controls
     BACKLOG_FEATURES = [
-        # "Backlog",
-        # "Backlog_Lag1",
+        "Backlog",
+        "Backlog_Lag1",
         "Backlog_Lag3",
         "Backlog_MA3"
     ]

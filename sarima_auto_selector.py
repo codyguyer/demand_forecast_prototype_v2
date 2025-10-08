@@ -1,0 +1,592 @@
+"""
+Automatic SARIMA order selection across multiple demand series.
+
+The selector follows the workflow requested by Cody:
+  * Clean monthly series, fill internal gaps with zeros
+  * Evaluate a compact SARIMA grid with expanding-window CV (h=1)
+  * Rank candidates by MAE, tie-break with AICc while preferring simpler orders
+  * Persist diagnostics including warning flags and Ljung-Box residual tests
+  * Fallback to a simple Theta/seasonal naive blend when SARIMA is not viable
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+import warnings
+
+import numpy as np
+import pandas as pd
+from statsmodels.tsa.statespace.sarimax import SARIMAX
+from statsmodels.tools.sm_exceptions import ConvergenceWarning
+from statsmodels.stats.diagnostic import acorr_ljungbox
+from statsmodels.tsa.forecasting.theta import ThetaModel
+
+
+@dataclass
+class FoldResult:
+    """Metrics and warnings per expanding-window fold."""
+
+    fold: int
+    train_end: pd.Timestamp
+    mae: float
+    actual: float
+    forecast: float
+    converged: bool
+    warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
+class CandidateResult:
+    """Aggregated metrics for a SARIMA order candidate."""
+
+    order: Tuple[int, int, int]
+    seasonal_order: Tuple[int, int, int, int]
+    mean_mae: float
+    mae_std: float
+    aicc: float
+    folds: List[FoldResult]
+    warning_messages: List[str]
+    full_fit: Any  # statsmodels SARIMAXResults; kept for diagnostics
+
+    @property
+    def complexity(self) -> int:
+        p, d, q = self.order
+        P, D, Q, _ = self.seasonal_order
+        return p + q + P + Q + d + D
+
+
+@dataclass
+class SeriesSelectionResult:
+    """Final selection payload per product series."""
+
+    series_key: str
+    group: str
+    bu: Optional[str]
+    status: str
+    best_order: Optional[Tuple[int, int, int]] = None
+    best_seasonal_order: Optional[Tuple[int, int, int, int]] = None
+    mean_mae_h1: Optional[float] = None
+    mae_h3: Optional[float] = None
+    aicc: Optional[float] = None
+    ljung_box_pvalue: Optional[float] = None
+    warning_messages: List[str] = field(default_factory=list)
+    fold_metrics: List[FoldResult] = field(default_factory=list)
+    fallback_model: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Compact dict for DataFrame export."""
+        return {
+            "series_key": self.series_key,
+            "group": self.group,
+            "bu": self.bu or "",
+            "status": self.status,
+            "order": self.best_order or (),
+            "seasonal_order": self.best_seasonal_order or (),
+            "mean_mae_h1": self.mean_mae_h1,
+            "mae_h3": self.mae_h3,
+            "aicc": self.aicc,
+            "ljung_box_pvalue": self.ljung_box_pvalue,
+            "fallback_model": self.fallback_model or "",
+            "warnings": " | ".join(self.warning_messages),
+        }
+
+
+class SARIMAOrderSelector:
+    """Coordinate SARIMA order selection across multiple demand series."""
+
+    def __init__(
+        self,
+        data: pd.DataFrame,
+        *,
+        product_groups: Dict[str, Sequence[str]],
+        forecast_by_bu: bool = False,
+        season_length: Optional[int] = None,
+        product_col: str = "Product",
+        date_col: str = "Month",
+        value_col: str = "Actuals",
+        bu_col: str = "BU",
+        burn_in: int = 24,
+        min_folds: int = 5,
+        max_folds: int = 6,
+        horizon: int = 1,
+        step: int = 1,
+        maxiter: int = 200,
+        max_retries: int = 2,
+        enforce_stationarity: bool = True,
+        enforce_invertibility: bool = True,
+        ljung_box_lags: Sequence[int] = (12,),
+        fallback_theta_period: Optional[int] = 12,
+    ) -> None:
+        self.data = data.copy()
+        self.product_groups = product_groups
+        self.forecast_by_bu = forecast_by_bu
+        self.product_col = product_col
+        self.date_col = date_col
+        self.value_col = value_col
+        self.bu_col = bu_col
+        self.burn_in = burn_in
+        self.horizon = horizon
+        self.step = step
+        self.min_folds = min_folds
+        self.max_folds = max_folds
+        self.maxiter = maxiter
+        self.max_retries = max_retries
+        self.enforce_stationarity = enforce_stationarity
+        self.enforce_invertibility = enforce_invertibility
+        self.ljung_box_lags = tuple(ljung_box_lags)
+        self.fallback_theta_period = fallback_theta_period
+
+        self._prepare_data()
+
+        # Assume monthly cadence; infer if not specified
+        if season_length:
+            self.season_length = season_length
+        else:
+            self.season_length = self._infer_season_length()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def run(self) -> List[SeriesSelectionResult]:
+        """Execute order selection for all configured product series."""
+        results: List[SeriesSelectionResult] = []
+        series_iterable = self._iter_series()
+
+        for series_key, series in series_iterable:
+            result = self._process_single_series(series_key, series)
+            results.append(result)
+
+        return results
+
+    def results_to_dataframe(self, results: Iterable[SeriesSelectionResult]) -> pd.DataFrame:
+        """Flatten selection results into a tabular DataFrame."""
+        return pd.DataFrame([res.to_dict() for res in results])
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _prepare_data(self) -> None:
+        """Ensure date column is datetime and values are numeric."""
+        if not np.issubdtype(self.data[self.date_col].dtype, np.datetime64):
+            self.data[self.date_col] = pd.to_datetime(self.data[self.date_col])
+        self.data = self.data.sort_values([self.product_col, self.date_col])
+        self.data[self.value_col] = pd.to_numeric(self.data[self.value_col], errors="coerce").fillna(0.0)
+
+    def _infer_season_length(self) -> int:
+        """Infer seasonality from month spacing (defaults to annual seasonality)."""
+        if self.date_col not in self.data.columns:
+            return 12
+        sorted_dates = self.data[self.date_col].sort_values()
+        if sorted_dates.empty:
+            return 12
+        deltas = sorted_dates.diff().dropna().value_counts()
+        if deltas.empty:
+            return 12
+        most_common_delta = deltas.index[0]
+        if most_common_delta.components.days in (28, 29, 30, 31):
+            return 12  # monthly cadence
+        # Fallback: assume annual seasonality for safety
+        return 12
+
+    def _iter_series(self) -> Iterable[Tuple[Tuple[str, Optional[str]], pd.Series]]:
+        """Yield (series_key, series) pairs based on product grouping."""
+        for group_name, product_ids in self.product_groups.items():
+            mask = self.data[self.product_col].isin(product_ids)
+            group_df = self.data.loc[mask]
+            if group_df.empty:
+                continue
+            if self.forecast_by_bu and self.bu_col in group_df.columns:
+                for bu_code, bu_df in group_df.groupby(self.bu_col):
+                    series = self._build_series(bu_df)
+                    if series is not None:
+                        yield (group_name, bu_code), series
+            else:
+                series = self._build_series(group_df)
+                if series is not None:
+                    yield (group_name, None), series
+
+    def _build_series(self, df: pd.DataFrame) -> Optional[pd.Series]:
+        """Aggregate to a monthly series, filling missing months with zeros."""
+        if df.empty:
+            return None
+        monthly = (
+            df.groupby(self.date_col)[self.value_col]
+            .sum()
+            .sort_index()
+        )
+        if monthly.empty:
+            return None
+        start, end = monthly.index.min(), monthly.index.max()
+        full_index = pd.date_range(start=start, end=end, freq="MS")
+        series = monthly.reindex(full_index, fill_value=0.0)
+        return series.astype(float)
+
+    def _process_single_series(
+        self,
+        series_key: Tuple[str, Optional[str]],
+        series: pd.Series,
+    ) -> SeriesSelectionResult:
+        """Evaluate the SARIMA grid for a single demand series."""
+        group_name, bu_code = series_key
+
+        if len(series) < max(self.burn_in, 12):
+            fallback = self._fallback_forecast(series, series_key, reason="short_history")
+            return fallback
+
+        candidates = self._generate_candidates(len(series))
+        candidate_results: List[CandidateResult] = []
+
+        for order, seasonal_order in candidates:
+            candidate_result = self._evaluate_candidate(series, order, seasonal_order)
+            if candidate_result:
+                candidate_results.append(candidate_result)
+
+        if not candidate_results:
+            fallback = self._fallback_forecast(series, series_key, reason="all_candidates_failed")
+            return fallback
+
+        best_candidate = self._select_best_candidate(candidate_results)
+        best_result = self._build_series_result(
+            series=series,
+            series_key=series_key,
+            candidate=best_candidate,
+        )
+        return best_result
+
+    def _generate_candidates(self, n_obs: int) -> List[Tuple[Tuple[int, int, int], Tuple[int, int, int, int]]]:
+        """Construct a compact SARIMA search space with short-series safeguards."""
+        pdq_grid: List[Tuple[int, int, int]] = []
+
+        def add_pdq(order: Tuple[int, int, int]) -> None:
+            if order != (0, 0, 0) and order not in pdq_grid:
+                pdq_grid.append(order)
+
+        core_orders = [
+            (0, 0, 0),
+            (1, 0, 0),
+            (0, 0, 1),
+            (1, 0, 1),
+        ]
+        extended_orders = [
+            (2, 0, 0),
+            (0, 0, 2),
+        ]
+        top_orders = [
+            (2, 0, 1),
+            (1, 0, 2),
+            (2, 0, 2),
+        ]
+
+        for d in (0, 1):
+            for base in core_orders:
+                add_pdq((base[0], d, base[2]))
+            if n_obs >= 48:
+                for ext in extended_orders:
+                    add_pdq((ext[0], d, ext[2]))
+            if n_obs >= 60:
+                for top in top_orders:
+                    add_pdq((top[0], d, top[2]))
+
+        seasonal_grid: List[Tuple[int, int, int, int]] = [(0, 0, 0, self.season_length)]
+        if n_obs >= 2 * self.season_length:
+            seasonal_grid.extend(
+                [
+                    (1, 0, 0, self.season_length),
+                    (0, 0, 1, self.season_length),
+                ]
+            )
+        if n_obs >= 3 * self.season_length:
+            seasonal_grid.append((0, 1, 0, self.season_length))
+        if n_obs >= 4 * self.season_length:
+            seasonal_grid.extend(
+                [
+                    (1, 1, 0, self.season_length),
+                    (0, 1, 1, self.season_length),
+                ]
+            )
+
+        candidates = [(order, seasonal) for order in pdq_grid for seasonal in seasonal_grid]
+        candidates.sort(key=lambda tpl: (sum(tpl[0]) + sum(tpl[1][:3]), tpl[0], tpl[1][:3]))
+        return candidates
+
+    def _evaluate_candidate(
+        self,
+        series: pd.Series,
+        order: Tuple[int, int, int],
+        seasonal_order: Tuple[int, int, int, int],
+    ) -> Optional[CandidateResult]:
+        """Evaluate a single SARIMA candidate via expanding-window CV."""
+        folds = self._expanding_window_cv(series, order, seasonal_order)
+        if not folds:
+            return None
+
+        mae_values = [fold.mae for fold in folds]
+        mean_mae = float(np.mean(mae_values))
+        mae_std = float(np.std(mae_values)) if len(mae_values) > 1 else 0.0
+
+        full_fit, warnings_full = self._fit_sarimax(series, order, seasonal_order)
+        if full_fit is None or full_fit.mle_retvals.get("converged", False) is False:
+            return None
+
+        warning_messages = [msg for fold in folds for msg in fold.warnings]
+        warning_messages.extend(warnings_full)
+        warning_messages = list(dict.fromkeys(warning_messages))
+
+        aicc = getattr(full_fit, "aicc", np.nan)
+
+        return CandidateResult(
+            order=order,
+            seasonal_order=seasonal_order,
+            mean_mae=mean_mae,
+            mae_std=mae_std,
+            aicc=float(aicc) if np.isfinite(aicc) else np.nan,
+            folds=folds,
+            warning_messages=warning_messages,
+            full_fit=full_fit,
+        )
+
+    def _expanding_window_cv(
+        self,
+        series: pd.Series,
+        order: Tuple[int, int, int],
+        seasonal_order: Tuple[int, int, int, int],
+        horizon: Optional[int] = None,
+    ) -> List[FoldResult]:
+        """Run expanding-window backtests for a candidate."""
+        n_obs = len(series)
+        fold_results: List[FoldResult] = []
+
+        cv_horizon = horizon or self.horizon
+        last_possible_start = n_obs - cv_horizon
+        if last_possible_start <= self.burn_in:
+            return fold_results
+
+        fold_end_indices = list(range(self.burn_in, last_possible_start + 1, self.step))
+        if not fold_end_indices:
+            return fold_results
+        if len(fold_end_indices) > self.max_folds:
+            fold_end_indices = fold_end_indices[-self.max_folds :]
+
+        for fold_num, train_end_idx in enumerate(fold_end_indices, start=1):
+            train_slice = series.iloc[:train_end_idx]
+            test_slice = series.iloc[train_end_idx : train_end_idx + cv_horizon]
+
+            if test_slice.empty:
+                continue
+
+            model_fit, warnings_list = self._fit_sarimax(train_slice, order, seasonal_order)
+            if model_fit is None:
+                return []  # Bail out on full candidate if any fold cannot fit
+
+            forecast = model_fit.get_forecast(steps=cv_horizon)
+            predicted = forecast.predicted_mean.iloc[: len(test_slice)]
+            mae = float(np.mean(np.abs(predicted.values - test_slice.values)))
+
+            fold_results.append(
+                FoldResult(
+                    fold=fold_num,
+                    train_end=train_slice.index[-1],
+                    mae=mae,
+                    actual=float(test_slice.iloc[-1]),
+                    forecast=float(predicted.iloc[-1]),
+                    converged=bool(model_fit.mle_retvals.get("converged", False)),
+                    warnings=warnings_list,
+                )
+            )
+
+        if len(fold_results) < min(self.min_folds, len(fold_end_indices)):
+            return []
+
+        return fold_results
+
+    def _fit_sarimax(
+        self,
+        series: pd.Series,
+        order: Tuple[int, int, int],
+        seasonal_order: Tuple[int, int, int, int],
+    ) -> Tuple[Optional[Any], List[str]]:
+        """Fit SARIMAX with retries and capture warnings."""
+        warnings_accumulator: List[str] = []
+
+        for attempt in range(1, self.max_retries + 1):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                try:
+                    model = SARIMAX(
+                        series,
+                        order=order,
+                        seasonal_order=seasonal_order,
+                        enforce_stationarity=self.enforce_stationarity,
+                        enforce_invertibility=self.enforce_invertibility,
+                        use_exact_diffuse=True,
+                    )
+                    fit_result = model.fit(
+                        disp=False,
+                        maxiter=self.maxiter,
+                    )
+                except (ValueError, np.linalg.LinAlgError) as exc:
+                    warnings_accumulator.append(f"fit_error: {exc}")
+                    fit_result = None
+
+            for warning in caught:
+                msg = str(warning.message)
+                warnings_accumulator.append(msg)
+
+            if fit_result is not None and fit_result.mle_retvals.get("converged", False):
+                return fit_result, warnings_accumulator
+
+        return None, warnings_accumulator
+
+    def _select_best_candidate(self, candidates: List[CandidateResult]) -> CandidateResult:
+        """Rank candidates by MAE, then AICc, then overall complexity."""
+        candidates_sorted = sorted(
+            candidates,
+            key=lambda cand: (
+                cand.mean_mae,
+                np.inf if cand.aicc is None else cand.aicc,
+                cand.complexity,
+            ),
+        )
+        return candidates_sorted[0]
+
+    def _build_series_result(
+        self,
+        series: pd.Series,
+        series_key: Tuple[str, Optional[str]],
+        candidate: CandidateResult,
+    ) -> SeriesSelectionResult:
+        """Assemble final metrics and diagnostics for the winning candidate."""
+        group_name, bu_code = series_key
+        unique_warnings = list(dict.fromkeys(candidate.warning_messages))
+        result = SeriesSelectionResult(
+            series_key=self._format_series_key(group_name, bu_code),
+            group=group_name,
+            bu=bu_code,
+            status="sarima_selected",
+            best_order=candidate.order,
+            best_seasonal_order=candidate.seasonal_order,
+            mean_mae_h1=candidate.mean_mae,
+            aicc=candidate.aicc,
+            warning_messages=unique_warnings,
+            fold_metrics=candidate.folds,
+        )
+
+        # Residual diagnostics on full fit
+        residual_pvalue = self._ljung_box(candidate.full_fit)
+        result.ljung_box_pvalue = residual_pvalue
+
+        # Non-selective h=3 check
+        mae_h3 = self._multi_step_mae(series, candidate.order, candidate.seasonal_order, horizon=3)
+        result.mae_h3 = mae_h3
+
+        return result
+
+    def _multi_step_mae(
+        self,
+        series: pd.Series,
+        order: Tuple[int, int, int],
+        seasonal_order: Tuple[int, int, int, int],
+        horizon: int,
+    ) -> Optional[float]:
+        """Evaluate the chosen model on h=3 expanding windows without reselection."""
+        fold_results = self._expanding_window_cv(series, order, seasonal_order, horizon=horizon)
+        if not fold_results:
+            return None
+        return float(np.mean([fold.mae for fold in fold_results]))
+
+    def _ljung_box(self, model_fit: Any) -> Optional[float]:
+        """Compute Ljung-Box p-value at requested seasonal lags."""
+        try:
+            residuals = model_fit.resid
+            residuals = residuals[np.isfinite(residuals)]
+            if residuals.size == 0:
+                return None
+            lb = acorr_ljungbox(residuals, lags=list(self.ljung_box_lags), return_df=True)
+            # Return worst-case (minimum) p-value across requested lags
+            pvalue = float(lb["lb_pvalue"].min())
+            return pvalue
+        except Exception as exc:
+            return None
+
+    def _fallback_forecast(
+        self,
+        series: pd.Series,
+        series_key: Tuple[str, Optional[str]],
+        reason: str,
+    ) -> SeriesSelectionResult:
+        """Provide a fallback result when SARIMA selection is not viable."""
+        group_name, bu_code = series_key
+        key_label = self._format_series_key(group_name, bu_code)
+
+        fallback_name = "Theta"
+        mae_h1 = None
+        mae_h3 = None
+        warnings_list: List[str] = ["sarima_unavailable", reason]
+
+        try:
+            theta = ThetaModel(series, period=self.fallback_theta_period or self.season_length)
+            theta_fit = theta.fit()
+            forecast = theta_fit.forecast(max(self.horizon, 1))
+            actual = series.iloc[-self.horizon :] if self.horizon > 0 else pd.Series(dtype=float)
+            align_len = min(len(actual), len(forecast))
+            if align_len > 0:
+                mae_h1 = float(np.mean(np.abs(forecast.iloc[-align_len:].values - actual.iloc[-align_len:].values)))
+
+            # Multi-step MAE
+            forecast_h3 = theta_fit.forecast(3)
+            actual_h3 = series.iloc[-3:]
+            align_h3 = min(len(actual_h3), len(forecast_h3))
+            if align_h3 > 0:
+                mae_h3 = float(np.mean(np.abs(forecast_h3.iloc[-align_h3:].values - actual_h3.iloc[-align_h3:].values)))
+        except Exception as exc:
+            fallback_name = "SeasonalNaive"
+            seasonal_lag = self.season_length
+            if len(series) > seasonal_lag:
+                naive_forecast = series.shift(seasonal_lag).iloc[-self.horizon :] if self.horizon > 0 else pd.Series(dtype=float)
+                actual = series.iloc[-self.horizon :] if self.horizon > 0 else pd.Series(dtype=float)
+                align_len = min(len(naive_forecast), len(actual))
+                if align_len > 0:
+                    mae_h1 = float(np.mean(np.abs(naive_forecast.iloc[-align_len:].values - actual.iloc[-align_len:].values)))
+                naive_h3 = series.shift(seasonal_lag).iloc[-3:]
+                actual_h3 = series.iloc[-3:]
+                align_h3 = min(len(naive_h3), len(actual_h3))
+                if align_h3 > 0:
+                    mae_h3 = float(np.mean(np.abs(naive_h3.iloc[-align_h3:].values - actual_h3.iloc[-align_h3:].values)))
+            warnings_list.append(f"fallback_error: {exc}")
+
+        return SeriesSelectionResult(
+            series_key=key_label,
+            group=group_name,
+            bu=bu_code,
+            status="fallback",
+            fallback_model=fallback_name,
+            mean_mae_h1=mae_h1,
+            mae_h3=mae_h3,
+            warning_messages=warnings_list,
+        )
+
+    @staticmethod
+    def _format_series_key(group_name: str, bu_code: Optional[str]) -> str:
+        return f"{group_name}__{bu_code}" if bu_code else group_name
+
+
+def run_order_selection(
+    *,
+    data_path: str,
+    product_groups: Dict[str, Sequence[str]],
+    forecast_by_bu: bool = False,
+    output_path: Optional[str] = None,
+) -> pd.DataFrame:
+    """Convenience wrapper to execute SARIMA order selection end-to-end."""
+    df = pd.read_csv(data_path)
+    selector = SARIMAOrderSelector(
+        df,
+        product_groups=product_groups,
+        forecast_by_bu=forecast_by_bu,
+    )
+    results = selector.run()
+    results_df = selector.results_to_dataframe(results)
+    if output_path:
+        results_df.to_csv(output_path, index=False)
+    return results_df

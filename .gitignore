@@ -3,6 +3,7 @@ Actuals.csv
 salesforce_data.csv
 sarima_forecast_results.csv
 Original_SARIMA_Params.txt
+Original_SARIMA_Params2_25-10-8.txt
 
 # Ignore generated analysis artifacts
 forecast_results_archive/
