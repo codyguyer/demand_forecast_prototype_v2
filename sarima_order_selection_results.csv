@@ -1,11 +1,2 @@
-series_key,group,bu,status,order,seasonal_order,mean_mae_h1,mae_h3,aicc,ljung_box_pvalue,fallback_model,warnings
-M11_dental__D200,M11_dental,D200,sarima_selected,"(1, 0, 1)","(1, 0, 0, 12)",34.562971638894204,54.90829402961911,610.2954366787068,0.059935274146112154,,
-M11_vet__D300,M11_vet,D300,sarima_selected,"(1, 0, 1)","(0, 0, 0, 12)",21.87607935143154,16.5786833065549,508.43762502009554,0.4614632606992283,,
-M9_dental__D200,M9_dental,D200,sarima_selected,"(0, 0, 1)","(1, 0, 0, 12)",5.9351821914216965,5.62247141718309,456.94747357419874,1.9401932258644375e-07,,
-M9_vet__D300,M9_vet,D300,sarima_selected,"(1, 0, 1)","(0, 0, 0, 12)",4.694924010348961,4.637179756911254,320.3844188600594,0.6836835835488853,,
-204__D100,204,D100,sarima_selected,"(1, 1, 1)","(0, 0, 0, 12)",127.58586353577346,126.98760685645958,656.9250159113294,0.7197757927140653,,
-224__D100,224,D100,sarima_selected,"(0, 1, 1)","(0, 0, 0, 12)",119.98528627790587,92.75412161995429,595.706089728234,0.3015227761608833,,Non-invertible starting MA parameters found. Using zeros as starting parameters.
-ECG__D100,ECG,D100,sarima_selected,"(1, 0, 1)","(1, 0, 0, 12)",56.40674860394401,61.63750132500539,576.4704739934667,0.8818739351819307,,Non-stationary starting seasonal autoregressive Using zeros as starting parameters.
-Digital_Vital_Signs__D100,Digital_Vital_Signs,D100,sarima_selected,"(0, 0, 1)","(0, 1, 0, 12)",24.0397880389671,44.21033534328911,408.5739410443078,0.01318140567370282,,
-250__D100,250,D100,sarima_selected,"(1, 1, 1)","(0, 1, 0, 12)",40.19497819005313,54.91985049641132,430.69267645376743,0.019916814124501726,,Non-stationary starting autoregressive parameters found. Using zeros as starting parameters. | Non-invertible starting MA parameters found. Using zeros as starting parameters.
-253__D100,253,D100,sarima_selected,"(1, 1, 0)","(1, 0, 0, 12)",68.61719555875008,121.51055350045523,583.3029231618674,0.7306848285829284,,
+series_key,group,bu,status,order,seasonal_order,mean_mae_h1,mae_h3,aicc,ljung_box_pvalue,fallback_model,volatility_class,warnings
+Preva__D200,Preva,D200,sarima_selected,"(0, 1, 0)","(1, 0, 0, 12)",63.3470229571748,,598.2667796999096,0.03753299071864285,,stable,

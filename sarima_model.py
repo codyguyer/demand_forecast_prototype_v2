@@ -5,8 +5,6 @@ Built from scratch for product demand forecasting with configurable parameters
 
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
 from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
@@ -18,7 +16,6 @@ from statsmodels.tsa.stattools import adfuller
 from statsmodels.stats.diagnostic import acorr_ljungbox
 from statsmodels.tsa.forecasting.theta import ThetaModel
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
-import os
 
 from config import SARIMAConfig
 from salesforce_integration import SalesforceIntegration
@@ -36,6 +33,7 @@ class SARIMAForecaster:
         self.forecasts = {}
         self.metrics = {}
         self.model_strategy = {}
+        self.model_details = {}
         self.combined_data = {}
         self.series_metadata = {}
         self.salesforce_integration = None
@@ -61,10 +59,6 @@ class SARIMAForecaster:
                 print(f"Warning: Unable to initialize backlog integration: {exc}")
                 self.backlog_integration = None
 
-        # Create output directory if needed
-        if self.config.OUTPUT_PLOTS and not os.path.exists(self.config.PLOTS_DIR):
-            os.makedirs(self.config.PLOTS_DIR)
-
     def _make_series_key(self, group_name, bu_code=None):
         """Create a unique key for a product group / BU combination."""
         if bu_code:
@@ -77,6 +71,81 @@ class SARIMAForecaster:
             bu_name = getattr(self.config, "BU_CODE_TO_NAME", {}).get(bu_code, bu_code)
             return f"{group_name} ({bu_name})"
         return group_name
+
+    @staticmethod
+    def _safe_round(value, digits=2):
+        """Safely round metric values while preserving NaN."""
+        if value is None or pd.isna(value):
+            return np.nan
+        return round(float(value), digits)
+
+    def _build_model_details(self, strategy, model, exog_columns=None):
+        """Create a descriptor bundle for the fitted model."""
+        if exog_columns is None:
+            exog_columns = []
+        elif isinstance(exog_columns, (pd.Index, np.ndarray)):
+            exog_columns = [str(col) for col in exog_columns.tolist()]
+        elif isinstance(exog_columns, (list, tuple)):
+            exog_columns = [str(col) for col in exog_columns]
+        else:
+            exog_columns = [str(exog_columns)]
+
+        details = {
+            "model_name": strategy,
+            "model_descriptor": strategy,
+            "sarima_params": "N/A",
+            "exogenous_used": exog_columns
+        }
+
+        if model is None:
+            return details
+
+        if strategy == 'ETS_THETA' and isinstance(model, dict):
+            weights = model.get('weights', (0.5, 0.5))
+            if not isinstance(weights, (list, tuple)) or len(weights) != 2:
+                weights = (0.5, 0.5)
+            theta_weight, ets_weight = weights
+            try:
+                theta_weight = float(theta_weight)
+            except (TypeError, ValueError):
+                theta_weight = np.nan
+            try:
+                ets_weight = float(ets_weight)
+            except (TypeError, ValueError):
+                ets_weight = np.nan
+            details["model_descriptor"] = (
+                f"ETS/Theta blend (theta={theta_weight:.2f}, ets={ets_weight:.2f})"
+            )
+            return details
+
+        model_type = getattr(model, "_codex_model_type", None)
+        order = getattr(model, "_codex_order", None)
+        seasonal_order = getattr(model, "_codex_seasonal_order", None)
+
+        if order is not None:
+            order_str = f"({order[0]},{order[1]},{order[2]})"
+        else:
+            order_str = "N/A"
+
+        if seasonal_order and isinstance(seasonal_order, tuple) and len(seasonal_order) == 4:
+            seasonal_str = f"({seasonal_order[0]},{seasonal_order[1]},{seasonal_order[2]},{seasonal_order[3]})"
+        else:
+            seasonal_str = "None"
+
+        if model_type == "SARIMA":
+            descriptor = f"SARIMA{order_str}x{seasonal_str}"
+            details["model_descriptor"] = descriptor
+            details["sarima_params"] = descriptor
+        elif model_type == "SARIMA_FALLBACK_ARIMA":
+            descriptor = f"Fallback ARIMA{order_str}"
+            details["model_descriptor"] = descriptor
+        elif model_type == "ARIMA":
+            descriptor = f"ARIMA{order_str}"
+            details["model_descriptor"] = descriptor
+        else:
+            details["model_descriptor"] = strategy
+
+        return details
 
     @staticmethod
     def _sanitize_label(label):
@@ -248,18 +317,6 @@ class SARIMAForecaster:
                 seasonal_strength = seasonal_var / (seasonal_var + residual_var)
                 print(f"Seasonal strength for {label}: {seasonal_strength:.3f}")
 
-                # Plot decomposition if enabled
-                if self.config.OUTPUT_PLOTS:
-                    fig, axes = plt.subplots(4, 1, figsize=(12, 10))
-                    decomposition.observed.plot(ax=axes[0], title=f'{label} - Original')
-                    decomposition.trend.plot(ax=axes[1], title='Trend')
-                    decomposition.seasonal.plot(ax=axes[2], title='Seasonal')
-                    decomposition.resid.plot(ax=axes[3], title='Residual')
-                    plt.tight_layout()
-                    file_stem = self._sanitize_label(label)
-                    plt.savefig(f'{self.config.PLOTS_DIR}/{file_stem}_decomposition.png')
-                    plt.close()
-
                 return seasonal_strength > self.config.SEASONALITY_THRESHOLD
 
         except Exception as e:
@@ -286,6 +343,20 @@ class SARIMAForecaster:
         test = series.iloc[split_point:]
         return train, test
 
+    def refit_model_on_full_history(self, strategy, group_name, full_series, exog_features=None, label=None):
+        """Refit the selected model using the complete history before forecasting."""
+        display_name = label or self._format_series_label(group_name)
+        try:
+            if strategy == 'SARIMA':
+                return self.fit_sarima_model(group_name, full_series, exog_features, label)
+            if strategy == 'ARIMA':
+                return self.fit_arima_model(group_name, full_series, exog_features, label)
+            if strategy == 'ETS_THETA':
+                return self.fit_theta_ets_model(group_name, full_series, label)
+        except Exception as exc:
+            print(f"Warning: Refit on full history failed for {display_name}: {exc}")
+        return None
+
     def fit_sarima_model(self, group_name, train_data, exog_train=None, label=None):
         """Fit SARIMA model for a product group"""
         display_name = label or group_name
@@ -309,6 +380,7 @@ class SARIMAForecaster:
                 exog=exog_train,
                 order=(p, d, q),
                 seasonal_order=(P, D, Q, s),
+                trend='c',
                 enforce_stationarity=False,
                 enforce_invertibility=True
             )
@@ -316,6 +388,9 @@ class SARIMAForecaster:
             fitted_model = model.fit(disp=False)
             print(f"Model fitted successfully for {display_name}")
             print(f"AIC: {fitted_model.aic:.2f}")
+            setattr(fitted_model, "_codex_model_type", "SARIMA")
+            setattr(fitted_model, "_codex_order", (p, d, q))
+            setattr(fitted_model, "_codex_seasonal_order", (P, D, Q, s))
 
             return fitted_model
 
@@ -327,11 +402,15 @@ class SARIMAForecaster:
                     train_data,
                     exog=exog_train,
                     order=(1, 1, 1),
+                    trend='c',
                     enforce_stationarity=False,
                     enforce_invertibility=True
                 )
                 fitted_model = fallback_model.fit(disp=False)
                 print(f"Fallback model fitted for {display_name}")
+                setattr(fitted_model, "_codex_model_type", "SARIMA_FALLBACK_ARIMA")
+                setattr(fitted_model, "_codex_order", (1, 1, 1))
+                setattr(fitted_model, "_codex_seasonal_order", None)
                 return fitted_model
             except Exception as e2:
                 print(f"Fallback model also failed for {display_name}: {e2}")
@@ -504,6 +583,7 @@ class SARIMAForecaster:
                 exog=exog_train,
                 order=order,
                 seasonal_order=(0, 0, 0, 0),
+                trend='c',
                 enforce_stationarity=False,
                 enforce_invertibility=True
             )
@@ -511,6 +591,9 @@ class SARIMAForecaster:
             fitted_model = model.fit(disp=False)
             print(f"Short-history ARIMA fitted successfully for {display_name}")
             print(f"AIC: {fitted_model.aic:.2f}")
+            setattr(fitted_model, "_codex_model_type", "ARIMA")
+            setattr(fitted_model, "_codex_order", order)
+            setattr(fitted_model, "_codex_seasonal_order", None)
             return fitted_model
 
         except Exception as exc:
@@ -518,14 +601,20 @@ class SARIMAForecaster:
             return None
 
     def calculate_metrics(self, actual, predicted, group_name):
-        """Calculate bias% and MAE% metrics"""
+        """Calculate forecast accuracy metrics for summary and exports."""
         # Remove any NaN values
         mask = ~(np.isnan(actual) | np.isnan(predicted))
         actual_clean = actual[mask]
         predicted_clean = predicted[mask]
 
         if len(actual_clean) == 0:
-            return {"bias_percent": np.nan, "mae_percent": np.nan}
+            return {
+                "bias_percent": np.nan,
+                "mae_percent": np.nan,
+                "rmse": np.nan,
+                "mape": np.nan,
+                "cov": np.nan
+            }
 
         # Bias percentage
         mean_actual = np.mean(actual_clean)
@@ -542,9 +631,36 @@ class SARIMAForecaster:
             total_abs_error = np.sum(np.abs(predicted_clean - actual_clean))
             mae_percent = (total_abs_error / total_actual) * 100
 
-        print(f"{group_name} - MAE%: {mae_percent:.2f}%, Bias%: {bias_percent:.2f}%")
+        # Root Mean Squared Error
+        rmse = np.sqrt(np.mean((predicted_clean - actual_clean) ** 2))
 
-        return {"bias_percent": bias_percent, "mae_percent": mae_percent}
+        # Mean Absolute Percentage Error (ignore zero actuals)
+        nonzero_mask = actual_clean != 0
+        if np.any(nonzero_mask):
+            mape = np.mean(
+                np.abs((predicted_clean[nonzero_mask] - actual_clean[nonzero_mask]) / actual_clean[nonzero_mask])
+            ) * 100
+        else:
+            mape = np.nan
+
+        # Coefficient of Variation for actual demand
+        if mean_actual != 0:
+            cov = (np.std(actual_clean) / np.abs(mean_actual)) * 100
+        else:
+            cov = np.nan
+
+        print(
+            f"{group_name} - MAE%: {mae_percent:.2f}%, Bias%: {bias_percent:.2f}%, "
+            f"RMSE: {rmse:.2f}, MAPE: {mape:.2f}%, CoV: {cov:.2f}%"
+        )
+
+        return {
+            "bias_percent": bias_percent,
+            "mae_percent": mae_percent,
+            "rmse": rmse,
+            "mape": mape,
+            "cov": cov
+        }
 
     def forecast_theta_ets(self, model_bundle, steps, start_index, group_name, bu_code=None, label=None):
         """Generate forecasts and confidence intervals for the ETS/Theta blend."""
@@ -636,51 +752,6 @@ class SARIMAForecaster:
             print(f"Error generating forecast for {group_name}: {e}")
             return None
 
-    def plot_results(self, series_key, label, historical_data, test_data, forecast_data):
-        """Plot historical data, test predictions, and forecasts"""
-        if not self.config.OUTPUT_PLOTS:
-            return
-
-        plt.figure(figsize=(15, 8))
-
-        # Plot historical data
-        plt.plot(historical_data.index, historical_data.values,
-                label='Historical Data', color='blue', linewidth=2)
-
-        # Plot test data
-        if test_data is not None and len(test_data) > 0:
-            plt.plot(test_data.index, test_data.values,
-                    label='Test Data', color='green', linewidth=2)
-
-        # Plot forecast
-        if forecast_data:
-            forecast_index = pd.date_range(
-                start=historical_data.index[-1] + pd.DateOffset(months=1),
-                periods=len(forecast_data['forecast']),
-                freq='MS'
-            )
-
-            plt.plot(forecast_index, forecast_data['forecast'],
-                    label='Forecast', color='red', linewidth=2)
-
-            # Plot confidence intervals
-            plt.fill_between(forecast_index,
-                           forecast_data['conf_int_lower'],
-                           forecast_data['conf_int_upper'],
-                           alpha=0.3, color='red', label=f'{int(self.config.CONFIDENCE_LEVEL*100)}% Confidence Interval')
-
-        model_label = self.model_strategy.get(series_key, 'SARIMA')
-        plt.title(f'{label} - {model_label} Forecast')
-        plt.xlabel('Date')
-        plt.ylabel('Demand')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.xticks(rotation=45)
-        plt.tight_layout()
-        file_stem = self._sanitize_label(label)
-        plt.savefig(f'{self.config.PLOTS_DIR}/{file_stem}_forecast.png', dpi=300, bbox_inches='tight')
-        plt.close()
-
     def run_forecasting(self):
         """Main method to run the complete forecasting pipeline"""
         print("Starting SARIMA forecasting pipeline...")
@@ -697,6 +768,7 @@ class SARIMAForecaster:
             group_name = metadata.get('group', series_key)
             bu_code = metadata.get('bu_code')
             label = self._format_series_label(group_name, bu_code)
+            exog_columns_used = []
 
             print(f"\nProcessing {label}...")
             print("-" * 30)
@@ -773,6 +845,10 @@ class SARIMAForecaster:
                 if exog_feature_frames:
                     exog_features = self.combine_exogenous_features(exog_feature_frames, index=ts_data.index)
                     exog_future = self.combine_exogenous_features(exog_future_frames)
+                    if exog_features is not None and not exog_features.empty:
+                        exog_columns_used = list(exog_features.columns)
+                    else:
+                        exog_columns_used = []
 
                     if exog_features is not None and exog_future is not None:
                         missing_cols = [col for col in exog_features.columns if col not in exog_future.columns]
@@ -784,6 +860,7 @@ class SARIMAForecaster:
                         print(f"Exogenous features missing forecast horizon coverage for {label}; proceeding without exogenous inputs.")
                         exog_features = None
                         exog_future = None
+                        exog_columns_used = []
                 ts_data = adjusted_series.astype(float)
 
             if strategy == 'SARIMA':
@@ -809,6 +886,7 @@ class SARIMAForecaster:
 
                 exog_train = exog_features.iloc[:split_point]
                 exog_test = exog_features.iloc[split_point:]
+                exog_columns_used = list(exog_train.columns)
 
                 if exog_future is not None:
                     missing_cols = [col for col in exog_train.columns if col not in exog_future.columns]
@@ -818,6 +896,7 @@ class SARIMAForecaster:
                 else:
                     exog_train = None
                     exog_test = None
+                    exog_columns_used = []
             else:
                 train_data, test_data = self.split_data(ts_data)
 
@@ -836,8 +915,9 @@ class SARIMAForecaster:
                 print(f'Unable to fit model for {label}; skipping forecast.')
                 continue
 
-            self.models[series_key] = model
             self.model_strategy[series_key] = strategy
+            model_for_forecast = model
+            refit_needed = len(ts_data) > len(train_data)
 
             if len(test_data) > 0:
                 if strategy == 'ETS_THETA':
@@ -861,12 +941,38 @@ class SARIMAForecaster:
                     test_predictions.values if hasattr(test_predictions, 'values') else np.asarray(test_predictions),
                     label
                 )
+                if refit_needed:
+                    print(f"Refitting {strategy} model on full history for {label} prior to final forecast...")
+                    refit_model = self.refit_model_on_full_history(
+                        strategy,
+                        group_name,
+                        ts_data,
+                        exog_features,
+                        label
+                    )
+                    if refit_model is not None:
+                        model_for_forecast = refit_model
+                    else:
+                        print(f"Warning: Using holdout-trained model for {label} forecast; refit was unsuccessful.")
+            elif refit_needed:
+                refit_model = self.refit_model_on_full_history(
+                    strategy,
+                    group_name,
+                    ts_data,
+                    exog_features,
+                    label
+                )
+                if refit_model is not None:
+                    model_for_forecast = refit_model
+
+            self.models[series_key] = model_for_forecast
+            self.model_details[series_key] = self._build_model_details(strategy, model_for_forecast, exog_columns_used)
 
             if strategy == 'ETS_THETA':
-                forecast = self.forecast_theta_ets(model, self.config.FORECAST_MONTHS, ts_data.index[-1], group_name, bu_code, label)
+                forecast = self.forecast_theta_ets(model_for_forecast, self.config.FORECAST_MONTHS, ts_data.index[-1], group_name, bu_code, label)
             else:
                 forecast = self.generate_forecast(
-                    model,
+                    model_for_forecast,
                     self.config.FORECAST_MONTHS,
                     label,
                     exog_future
@@ -881,19 +987,44 @@ class SARIMAForecaster:
                     freq='MS'
                 )
 
+                metrics = self.metrics.get(series_key, {})
+                mae_percent = self._safe_round(metrics.get('mae_percent'))
+                bias_percent = self._safe_round(metrics.get('bias_percent'))
+                rmse = self._safe_round(metrics.get('rmse'))
+                mape = self._safe_round(metrics.get('mape'))
+                cov = self._safe_round(metrics.get('cov'))
+                detail_bundle = self.model_details.get(series_key, {})
+                model_used = detail_bundle.get('model_descriptor') or self.model_strategy.get(series_key, 'Unknown')
+                sarima_params = detail_bundle.get('sarima_params') or 'N/A'
+                exog_used = detail_bundle.get('exogenous_used') or []
+                if isinstance(exog_used, (pd.Index, np.ndarray)):
+                    exog_used_iter = [str(col) for col in exog_used.tolist()]
+                elif isinstance(exog_used, (list, tuple, set)):
+                    exog_used_iter = [str(col) for col in exog_used]
+                else:
+                    exog_used_iter = [str(exog_used)] if exog_used else []
+                exog_used_iter = [item for item in (val.strip() for val in exog_used_iter) if item]
+                exog_used_str = ", ".join(dict.fromkeys(exog_used_iter)) if exog_used_iter else "None"
+
                 for i, date in enumerate(forecast_dates):
                     results_summary.append({
                         'Product_Group': group_name,
                         'BU': bu_code if bu_code else '',
                         'BU_Name': getattr(self.config, "BU_CODE_TO_NAME", {}).get(bu_code, '') if bu_code else '',
                         'Model_Type': self.model_strategy.get(series_key, 'SARIMA'),
+                        'Model_Used': model_used,
+                        'SARIMA_Params': sarima_params,
+                        'Exogenous_Used': exog_used_str,
                         'Date': date.strftime('%Y-%m'),
                         'Forecast': round(forecast['forecast'].iloc[i], 0),
                         'Lower_CI': round(forecast['conf_int_lower'].iloc[i], 0),
-                        'Upper_CI': round(forecast['conf_int_upper'].iloc[i], 0)
+                        'Upper_CI': round(forecast['conf_int_upper'].iloc[i], 0),
+                        'MAE%': mae_percent,
+                        'Bias%': bias_percent,
+                        'RMSE': rmse,
+                        'MAPE': mape,
+                        'CoV': cov
                     })
-            self.plot_results(series_key, label, train_data, test_data, forecast)
-
         if self.config.SAVE_RESULTS and results_summary:
             results_df = pd.DataFrame(results_summary)
             results_df.to_csv(self.config.RESULTS_FILE, index=False)
@@ -921,17 +1052,30 @@ class SARIMAForecaster:
         if self.metrics:
             print("\nModel Performance Metrics:")
             print("-" * 25)
+
+            def format_metric(value, digits=2, suffix='%'):
+                if value is None or pd.isna(value):
+                    return "N/A"
+                return f"{float(value):.{digits}f}{suffix}"
+
             for key, metrics in self.metrics.items():
                 label = label_for(key)
-                print(f"{label}: MAE%={metrics['mae_percent']:.2f}%, Bias%={metrics['bias_percent']:.2f}%")
+                print(
+                    f"{label}: "
+                    f"MAE%={format_metric(metrics.get('mae_percent'))}, "
+                    f"Bias%={format_metric(metrics.get('bias_percent'))}, "
+                    f"RMSE={format_metric(metrics.get('rmse'), suffix='')}, "
+                    f"MAPE={format_metric(metrics.get('mape'))}, "
+                    f"CoV={format_metric(metrics.get('cov'))}"
+                )
 
         if self.forecasts:
             print("\nNext 12-month forecasts generated for:")
             for key in self.forecasts.keys():
                 label = label_for(key)
-                model_used = self.model_strategy.get(key, 'SARIMA')
+                detail = self.model_details.get(key, {})
+                model_used = detail.get('model_descriptor') or self.model_strategy.get(key, 'SARIMA')
                 print(f"  - {label} ({model_used})")
 
 
-        print(f"\nPlots saved to: {self.config.PLOTS_DIR}/")
         print("="*50)

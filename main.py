@@ -5,7 +5,6 @@ Execute this file to generate forecasts for all product groups
 
 from sarima_model import SARIMAForecaster
 from config import SARIMAConfig
-import pandas as pd
 
 def main():
     """
@@ -43,13 +42,6 @@ def main():
     if results:
         print(f"\n[SUCCESS] Forecasting completed successfully!")
         print(f"  - Results saved to: {config.RESULTS_FILE}")
-        print(f"  - Plots saved to: {config.PLOTS_DIR}/")
-
-        # Display sample results
-        results_df = pd.DataFrame(results)
-        print(f"\nSample forecast results:")
-        print(results_df.head(12).to_string(index=False))
-
     else:
         print("\n[ERROR] No forecasting results generated. Check your data and configuration.")
 

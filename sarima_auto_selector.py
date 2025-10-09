@@ -42,10 +42,13 @@ class CandidateResult:
 
     order: Tuple[int, int, int]
     seasonal_order: Tuple[int, int, int, int]
-    mean_mae: float
-    mae_std: float
+    mean_mae_h1: float
+    mean_mae_h3: float
+    mae_std_h1: float
+    mae_std_h3: float
     aicc: float
-    folds: List[FoldResult]
+    folds_h1: List[FoldResult]
+    folds_h3: List[FoldResult]
     warning_messages: List[str]
     full_fit: Any  # statsmodels SARIMAXResults; kept for diagnostics
 
@@ -73,6 +76,7 @@ class SeriesSelectionResult:
     warning_messages: List[str] = field(default_factory=list)
     fold_metrics: List[FoldResult] = field(default_factory=list)
     fallback_model: Optional[str] = None
+    volatility_class: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Compact dict for DataFrame export."""
@@ -88,6 +92,7 @@ class SeriesSelectionResult:
             "aicc": self.aicc,
             "ljung_box_pvalue": self.ljung_box_pvalue,
             "fallback_model": self.fallback_model or "",
+            "volatility_class": self.volatility_class or "",
             "warnings": " | ".join(self.warning_messages),
         }
 
@@ -117,6 +122,7 @@ class SARIMAOrderSelector:
         enforce_invertibility: bool = True,
         ljung_box_lags: Sequence[int] = (12,),
         fallback_theta_period: Optional[int] = 12,
+        volatility_threshold: float = 0.5,
     ) -> None:
         self.data = data.copy()
         self.product_groups = product_groups
@@ -136,6 +142,7 @@ class SARIMAOrderSelector:
         self.enforce_invertibility = enforce_invertibility
         self.ljung_box_lags = tuple(ljung_box_lags)
         self.fallback_theta_period = fallback_theta_period
+        self.volatility_threshold = volatility_threshold
 
         self._prepare_data()
 
@@ -230,15 +237,22 @@ class SARIMAOrderSelector:
         """Evaluate the SARIMA grid for a single demand series."""
         group_name, bu_code = series_key
 
+        is_volatile = self._is_series_volatile(series)
+
         if len(series) < max(self.burn_in, 12):
             fallback = self._fallback_forecast(series, series_key, reason="short_history")
             return fallback
 
-        candidates = self._generate_candidates(len(series))
+        candidates = self._generate_candidates(len(series), is_volatile=is_volatile)
         candidate_results: List[CandidateResult] = []
 
         for order, seasonal_order in candidates:
-            candidate_result = self._evaluate_candidate(series, order, seasonal_order)
+            candidate_result = self._evaluate_candidate(
+                series,
+                order,
+                seasonal_order,
+                is_volatile=is_volatile,
+            )
             if candidate_result:
                 candidate_results.append(candidate_result)
 
@@ -246,15 +260,21 @@ class SARIMAOrderSelector:
             fallback = self._fallback_forecast(series, series_key, reason="all_candidates_failed")
             return fallback
 
-        best_candidate = self._select_best_candidate(candidate_results)
+        best_candidate = self._select_best_candidate(candidate_results, is_volatile=is_volatile)
         best_result = self._build_series_result(
             series=series,
             series_key=series_key,
             candidate=best_candidate,
+            is_volatile=is_volatile,
         )
         return best_result
 
-    def _generate_candidates(self, n_obs: int) -> List[Tuple[Tuple[int, int, int], Tuple[int, int, int, int]]]:
+    def _generate_candidates(
+        self,
+        n_obs: int,
+        *,
+        is_volatile: bool,
+    ) -> List[Tuple[Tuple[int, int, int], Tuple[int, int, int, int]]]:
         """Construct a compact SARIMA search space with short-series safeguards."""
         pdq_grid: List[Tuple[int, int, int]] = []
 
@@ -278,36 +298,115 @@ class SARIMAOrderSelector:
             (2, 0, 2),
         ]
 
+        volatility_orders = [
+            (1, 1, 0),
+            (0, 1, 1),
+            (1, 1, 1),
+            (2, 1, 1),
+            (1, 1, 2),
+            (2, 1, 2),
+        ]
+
         for d in (0, 1):
             for base in core_orders:
                 add_pdq((base[0], d, base[2]))
-            if n_obs >= 48:
+            if n_obs >= 48 or (is_volatile and n_obs >= 32):
                 for ext in extended_orders:
                     add_pdq((ext[0], d, ext[2]))
-            if n_obs >= 60:
+            if n_obs >= 60 or (is_volatile and n_obs >= 36):
                 for top in top_orders:
                     add_pdq((top[0], d, top[2]))
 
-        seasonal_grid: List[Tuple[int, int, int, int]] = [(0, 0, 0, self.season_length)]
-        if n_obs >= 2 * self.season_length:
-            seasonal_grid.extend(
-                [
-                    (1, 0, 0, self.season_length),
-                    (0, 0, 1, self.season_length),
-                ]
-            )
-        if n_obs >= 3 * self.season_length:
-            seasonal_grid.append((0, 1, 0, self.season_length))
-        if n_obs >= 4 * self.season_length:
-            seasonal_grid.extend(
-                [
-                    (1, 1, 0, self.season_length),
-                    (0, 1, 1, self.season_length),
-                ]
+        if is_volatile:
+            for extra in volatility_orders:
+                add_pdq(extra)
+
+        seasonal_grid: List[Tuple[int, int, int, int]] = []
+
+        def add_seasonal(order: Tuple[int, int, int, int]) -> None:
+            if order not in seasonal_grid:
+                seasonal_grid.append(order)
+
+        add_seasonal((0, 0, 0, self.season_length))
+
+        has_one_season = n_obs >= self.season_length
+        has_two_seasons = n_obs >= 2 * self.season_length
+        has_three_seasons = n_obs >= 3 * self.season_length
+        has_four_seasons = n_obs >= 4 * self.season_length
+        limited_history = not has_four_seasons
+
+        if has_two_seasons:
+            add_seasonal((0, 1, 0, self.season_length))
+
+        if has_two_seasons:
+            add_seasonal((1, 0, 0, self.season_length))
+            add_seasonal((0, 0, 1, self.season_length))
+
+        if is_volatile and has_two_seasons:
+            add_seasonal((0, 1, 1, self.season_length))
+
+        if has_three_seasons and not limited_history:
+            add_seasonal((1, 0, 1, self.season_length))
+
+        if is_volatile and has_four_seasons:
+            add_seasonal((1, 1, 0, self.season_length))
+
+        if has_four_seasons:
+            add_seasonal((1, 1, 1, self.season_length))
+
+        seen_pairs: set[Tuple[Tuple[int, int, int], Tuple[int, int, int, int]]] = set()
+        matched: List[Tuple[Tuple[int, int, int], Tuple[int, int, int, int]]] = []
+        unmatched: List[Tuple[Tuple[int, int, int], Tuple[int, int, int, int]]] = []
+
+        for order in pdq_grid:
+            for seasonal in seasonal_grid:
+                pair = (order, seasonal)
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+                if order[1] == seasonal[1]:
+                    matched.append(pair)
+                else:
+                    unmatched.append(pair)
+
+        def candidate_priority(
+            pair: Tuple[Tuple[int, int, int], Tuple[int, int, int, int]]
+        ) -> Tuple[int, Tuple[int, int, int], Tuple[int, int, int]]:
+            order, seasonal = pair
+            return (
+                sum(order) + sum(seasonal[:3]),
+                order,
+                seasonal[:3],
             )
 
-        candidates = [(order, seasonal) for order in pdq_grid for seasonal in seasonal_grid]
-        candidates.sort(key=lambda tpl: (sum(tpl[0]) + sum(tpl[1][:3]), tpl[0], tpl[1][:3]))
+        matched.sort(key=candidate_priority)
+        unmatched.sort(key=candidate_priority)
+
+        if is_volatile:
+            preferred_pairs: List[Tuple[Tuple[int, int, int], Tuple[int, int, int, int]]] = []
+            seasonal_priority = [
+                (0, 1, 1, self.season_length),
+                (1, 1, 0, self.season_length),
+                (1, 1, 1, self.season_length),
+            ]
+            order_priority = [
+                (1, 1, 0),
+                (0, 1, 1),
+                (1, 1, 1),
+                (2, 1, 1),
+            ]
+            for seasonal in seasonal_priority:
+                for order in order_priority:
+                    preferred_pairs.append((order, seasonal))
+            prioritized: List[Tuple[Tuple[int, int, int], Tuple[int, int, int, int]]] = []
+            for pair in preferred_pairs:
+                if pair in matched:
+                    matched.remove(pair)
+                    prioritized.append(pair)
+            matched = prioritized + matched
+            return matched
+
+        candidates = matched + unmatched
         return candidates
 
     def _evaluate_candidate(
@@ -315,21 +414,41 @@ class SARIMAOrderSelector:
         series: pd.Series,
         order: Tuple[int, int, int],
         seasonal_order: Tuple[int, int, int, int],
+        *,
+        is_volatile: bool,
     ) -> Optional[CandidateResult]:
         """Evaluate a single SARIMA candidate via expanding-window CV."""
-        folds = self._expanding_window_cv(series, order, seasonal_order)
-        if not folds:
+        folds_h1 = self._expanding_window_cv(series, order, seasonal_order)
+        if not folds_h1:
             return None
 
-        mae_values = [fold.mae for fold in folds]
-        mean_mae = float(np.mean(mae_values))
-        mae_std = float(np.std(mae_values)) if len(mae_values) > 1 else 0.0
+        mae_values_h1 = [fold.mae for fold in folds_h1]
+        mean_mae_h1 = float(np.mean(mae_values_h1))
+        mae_std_h1 = float(np.std(mae_values_h1)) if len(mae_values_h1) > 1 else 0.0
+
+        if is_volatile:
+            folds_h3 = self._expanding_window_cv(series, order, seasonal_order, horizon=3)
+            if folds_h3:
+                mae_values_h3 = [fold.mae for fold in folds_h3]
+                mean_mae_h3 = float(np.mean(mae_values_h3))
+                mae_std_h3 = float(np.std(mae_values_h3)) if len(mae_values_h3) > 1 else 0.0
+            else:
+                # Penalise candidates that cannot support the longer horizon
+                mean_mae_h3 = float("inf")
+                mae_std_h3 = float("inf")
+                folds_h3 = []
+        else:
+            folds_h3 = []
+            mean_mae_h3 = np.nan
+            mae_std_h3 = np.nan
 
         full_fit, warnings_full = self._fit_sarimax(series, order, seasonal_order)
         if full_fit is None or full_fit.mle_retvals.get("converged", False) is False:
             return None
 
-        warning_messages = [msg for fold in folds for msg in fold.warnings]
+        warning_messages = [msg for fold in folds_h1 for msg in fold.warnings]
+        if folds_h3:
+            warning_messages.extend(msg for fold in folds_h3 for msg in fold.warnings)
         warning_messages.extend(warnings_full)
         warning_messages = list(dict.fromkeys(warning_messages))
 
@@ -338,10 +457,13 @@ class SARIMAOrderSelector:
         return CandidateResult(
             order=order,
             seasonal_order=seasonal_order,
-            mean_mae=mean_mae,
-            mae_std=mae_std,
+            mean_mae_h1=mean_mae_h1,
+            mean_mae_h3=mean_mae_h3,
+            mae_std_h1=mae_std_h1,
+            mae_std_h3=mae_std_h3,
             aicc=float(aicc) if np.isfinite(aicc) else np.nan,
-            folds=folds,
+            folds_h1=folds_h1,
+            folds_h3=folds_h3,
             warning_messages=warning_messages,
             full_fit=full_fit,
         )
@@ -417,6 +539,7 @@ class SARIMAOrderSelector:
                         series,
                         order=order,
                         seasonal_order=seasonal_order,
+                        trend='c',
                         enforce_stationarity=self.enforce_stationarity,
                         enforce_invertibility=self.enforce_invertibility,
                         use_exact_diffuse=True,
@@ -438,12 +561,28 @@ class SARIMAOrderSelector:
 
         return None, warnings_accumulator
 
-    def _select_best_candidate(self, candidates: List[CandidateResult]) -> CandidateResult:
-        """Rank candidates by MAE, then AICc, then overall complexity."""
+    def _select_best_candidate(
+        self,
+        candidates: List[CandidateResult],
+        *,
+        is_volatile: bool,
+    ) -> CandidateResult:
+        """Rank candidates with volatility-aware MAE priorities."""
+
+        def primary_mae(cand: CandidateResult) -> float:
+            if is_volatile and np.isfinite(cand.mean_mae_h3):
+                return cand.mean_mae_h3
+            return cand.mean_mae_h1
+
+        def blended_mae(cand: CandidateResult) -> float:
+            mae_h3 = cand.mean_mae_h3 if np.isfinite(cand.mean_mae_h3) else cand.mean_mae_h1
+            return 0.5 * (cand.mean_mae_h1 + mae_h3)
+
         candidates_sorted = sorted(
             candidates,
             key=lambda cand: (
-                cand.mean_mae,
+                primary_mae(cand),
+                blended_mae(cand),
                 np.inf if cand.aicc is None else cand.aicc,
                 cand.complexity,
             ),
@@ -455,6 +594,7 @@ class SARIMAOrderSelector:
         series: pd.Series,
         series_key: Tuple[str, Optional[str]],
         candidate: CandidateResult,
+        is_volatile: bool,
     ) -> SeriesSelectionResult:
         """Assemble final metrics and diagnostics for the winning candidate."""
         group_name, bu_code = series_key
@@ -466,34 +606,21 @@ class SARIMAOrderSelector:
             status="sarima_selected",
             best_order=candidate.order,
             best_seasonal_order=candidate.seasonal_order,
-            mean_mae_h1=candidate.mean_mae,
+            mean_mae_h1=candidate.mean_mae_h1,
             aicc=candidate.aicc,
             warning_messages=unique_warnings,
-            fold_metrics=candidate.folds,
+            fold_metrics=candidate.folds_h1,
+            volatility_class="volatile" if is_volatile else "stable",
         )
 
         # Residual diagnostics on full fit
         residual_pvalue = self._ljung_box(candidate.full_fit)
         result.ljung_box_pvalue = residual_pvalue
 
-        # Non-selective h=3 check
-        mae_h3 = self._multi_step_mae(series, candidate.order, candidate.seasonal_order, horizon=3)
-        result.mae_h3 = mae_h3
+        # Retain meta h=3 MAE from candidate evaluation
+        result.mae_h3 = candidate.mean_mae_h3 if np.isfinite(candidate.mean_mae_h3) else None
 
         return result
-
-    def _multi_step_mae(
-        self,
-        series: pd.Series,
-        order: Tuple[int, int, int],
-        seasonal_order: Tuple[int, int, int, int],
-        horizon: int,
-    ) -> Optional[float]:
-        """Evaluate the chosen model on h=3 expanding windows without reselection."""
-        fold_results = self._expanding_window_cv(series, order, seasonal_order, horizon=horizon)
-        if not fold_results:
-            return None
-        return float(np.mean([fold.mae for fold in fold_results]))
 
     def _ljung_box(self, model_fit: Any) -> Optional[float]:
         """Compute Ljung-Box p-value at requested seasonal lags."""
@@ -569,6 +696,17 @@ class SARIMAOrderSelector:
     @staticmethod
     def _format_series_key(group_name: str, bu_code: Optional[str]) -> str:
         return f"{group_name}__{bu_code}" if bu_code else group_name
+
+    def _is_series_volatile(self, series: pd.Series) -> bool:
+        """Classify a series as volatile using coefficient of variation."""
+        if series.empty:
+            return False
+        mean = float(series.mean())
+        std = float(series.std())
+        if mean <= 0:
+            return True
+        cv = std / mean
+        return cv >= self.volatility_threshold
 
 
 def run_order_selection(

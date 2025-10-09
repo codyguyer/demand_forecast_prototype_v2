@@ -198,6 +198,7 @@ class SalesforceIntegration:
                 exog=exog_train,
                 order=(p, d, q),
                 seasonal_order=(P, D, Q, s),
+                trend='c',
                 enforce_stationarity=False,
                 enforce_invertibility=False
             )

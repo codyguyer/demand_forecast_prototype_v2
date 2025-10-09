@@ -12,7 +12,7 @@ class SARIMAConfig:
     CURRENT_MONTH = "2025-09"  # Use last fully completed month
     USE_SALESFORCE = False
     SALESFORCE_DATA_FILE = "salesforce_data.csv"
-    USE_BACKLOG = True
+    USE_BACKLOG = True # [ln(t)-ln(t-1)]*0.1 and do not include any future months
     BACKLOG_DATA_FILE = "Backlog.csv"
     FORECAST_BY_BU = True
     BUSINESS_UNITS = ("D100", "D200", "D300")
@@ -38,7 +38,9 @@ class SARIMAConfig:
         "ECG": ["ITEM_4-000-0080"],
         "Digital_Vital_Signs": ["     ITEM_4-000-0550"],
         "250": ["PROD_50"],
-        "253": ["Prod_53"]
+        "253": ["Prod_53"],
+        "255": ["prod_255"],
+        "Preva": ["Prod_21200"]
     }
 
     # SARIMA parameters (p,d,q,P,D,Q,s) for each product group
@@ -56,7 +58,9 @@ class SARIMAConfig:
         "ECG": (1, 0, 1, 1, 0, 0, 12),
         "Digital_Vital_Signs": (0, 0, 1, 0, 1, 0, 12),
         "250": (1, 1, 1, 0, 1, 0, 12),
-        "253": (1, 1, 0, 1, 0, 0, 12)
+        "253": (1, 1, 0, 1, 0, 0, 12),
+        "255": (0, 0, 2, 1, 0, 1, 12),
+        "Preva": (0, 1, 0, 1, 0, 0, 12)
     }
 
     # Model evaluation parameters
@@ -99,7 +103,9 @@ class SARIMAConfig:
         "ECG": "quantity",
         "Digital_Vital_Signs": "quantity",
         "250": "quantity",
-        "253": "quantity"
+        "253": "quantity",
+        "255": "quantity",
+        "Preva": "quantity"
     }
 
     # Backlog feature controls
@@ -117,7 +123,7 @@ class SARIMAConfig:
     MIN_OBSERVATIONS = 24  # Minimum observations needed for reliable seasonal analysis
 
     # Output configuration
-    OUTPUT_PLOTS = True
+    OUTPUT_PLOTS = False
     SAVE_RESULTS = True
     RESULTS_FILE = "sarima_forecast_results.csv"
     PLOTS_DIR = "plots"
