@@ -3,8 +3,34 @@ SARIMA Model Configuration
 Easily adjustable parameters for forecasting models
 """
 
+from __future__ import annotations
+
+import csv
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple, Union
+
+
 class SARIMAConfig:
-    """Configuration class for SARIMA model parameters"""
+    """Configuration class for SARIMA model parameters backed by a managed catalog."""
+
+    BASE_DIR = Path(__file__).resolve().parent
+    MANAGED_CATALOG_FILE = BASE_DIR / "managed_data" / "product_catalog.csv"
+    ORDER_COLUMN_NAMES: Tuple[str, ...] = (
+        "sarima_p",
+        "sarima_d",
+        "sarima_q",
+        "sarima_P",
+        "sarima_D",
+        "sarima_Q",
+        "sarima_s",
+    )
+    REQUIRED_CATALOG_COLUMNS: Tuple[str, ...] = (
+        "group_key",
+        "sku_list",
+        "business_unit_code",
+        "business_unit_name",
+        "salesforce_feature_mode",
+    ) + ORDER_COLUMN_NAMES
 
     # Data configuration
     DATA_FILE = "Actuals.csv"
@@ -12,59 +38,20 @@ class SARIMAConfig:
     CURRENT_MONTH = "2025-09"  # Use last fully completed month
     USE_SALESFORCE = False
     SALESFORCE_DATA_FILE = "salesforce_data.csv"
-    USE_BACKLOG = True # [ln(t)-ln(t-1)]*0.1 and do not include any future months
+    USE_BACKLOG = True  # [ln(t)-ln(t-1)]*0.1 and do not include any future months
     BACKLOG_DATA_FILE = "Backlog.csv"
     FORECAST_BY_BU = True
-    BUSINESS_UNITS = ("D100", "D200", "D300")
-    BU_CODE_TO_NAME = {
-        "D100": "Medical",
-        "D200": "Dental",
-        "D300": "Animal Health"
-    }
-    BU_NAME_TO_CODE = {
-        "Medical": "D100",
-        "Dental": "D200",
-        "Animal Health": "D300"
-    }
 
-    # Product grouping and replacement mapping
-    PRODUCT_GROUPS = {
-        "M11_dental": ["     ITEM_M11-040", "     ITEM_M11-050"],  # M11-040 being replaced by M11-050
-        "M11_vet": ["     ITEM_M11-043", "     ITEM_M11-053"],  # M11-043 being replaced by M11-053
-        "M9_dental": ["     ITEM_M9-040", "     ITEM_M9-050"],  # M9-040 being replaced by M9-050
-        "M9_vet": ["     ITEM_M9-043", "     ITEM_M9-053"],  # M9-043 being replaced by M9-053
-        "204": ["Prod_204"],
-        "224": ["     Prod_224"],
-        "ECG": ["ITEM_4-000-0080"],
-        "Digital_Vital_Signs": ["     ITEM_4-000-0550"],
-        "250": ["PROD_50"],
-        "253": ["Prod_53"],
-        "255": ["prod_255"],
-        "Preva": ["Prod_21200"]
-    }
-
-    # SARIMA parameters (p,d,q,P,D,Q,s) for each product group
-    # Format: (p, d, q, P, D, Q, s)
-    # p,d,q: non-seasonal AR, differencing, MA order
-    # P,D,Q: seasonal AR, differencing, MA order
-    # s: seasonal period (12 for monthly data with annual seasonality)
-    SARIMA_PARAMS = {
-        "M11_dental": (1, 0, 1, 1, 0, 0, 12),
-        "M11_vet": (1, 0, 1, 0, 0, 0, 12),
-        "M9_dental": (0, 0, 1, 1, 0, 0, 12),
-        "M9_vet": (1, 0, 1, 0, 0, 0, 12),
-        "204": (1, 1, 1, 0, 0, 0, 12),
-        "224": (0, 1, 1, 0, 0, 0, 12),
-        "ECG": (1, 0, 1, 1, 0, 0, 12),
-        "Digital_Vital_Signs": (0, 0, 1, 0, 1, 0, 12),
-        "250": (1, 1, 1, 0, 1, 0, 12),
-        "253": (1, 1, 0, 1, 0, 0, 12),
-        "255": (0, 0, 2, 1, 0, 1, 12),
-        "Preva": (0, 1, 0, 1, 0, 0, 12)
-    }
+    # Managed metadata containers populated at runtime
+    BUSINESS_UNITS: Sequence[str] = ()
+    BU_CODE_TO_NAME: Dict[str, str] = {}
+    BU_NAME_TO_CODE: Dict[str, str] = {}
+    PRODUCT_GROUPS: Dict[str, List[str]] = {}
+    SARIMA_PARAMS: Dict[str, Tuple[int, int, int, int, int, int, int]] = {}
+    SALESFORCE_FEATURE_MODE_BY_GROUP: Dict[str, str] = {}
 
     # Model evaluation parameters
-    CONFIDENCE_LEVEL = 0.90  # 90% confidence intervals (±1.645 std dev)
+    CONFIDENCE_LEVEL = 0.90  # 90% confidence intervals (approx 1.645 std dev)
     TEST_SPLIT_MONTHS = 6  # Number of months to hold out for testing
 
     # Future Salesforce integration parameters
@@ -73,7 +60,7 @@ class SARIMAConfig:
         "weighted_pipeline_dollars": "Weighted Pipeline Dollars",
         "weighted_pipeline_quantity": "Weighted Pipeline Quantity",
         "close_date": "Close Date",
-        "business_unit": "Business Unit"
+        "business_unit": "Business Unit",
     }
 
     # Salesforce feature controls
@@ -82,30 +69,14 @@ class SARIMAConfig:
             "Weighted_Pipeline_Quantity",
             "Pipeline_Quantity_Lag1",
             "Pipeline_Quantity_Lag3",
-            "Pipeline_Quantity_MA3"
+            "Pipeline_Quantity_MA3",
         ],
         "dollars": [
             "Weighted_Pipeline_Amount",
             "Pipeline_Amount_Lag1",
             "Pipeline_Amount_Lag3",
-            "Pipeline_Amount_MA3"
-        ]
-    }
-
-    SALESFORCE_FEATURE_MODE_BY_GROUP = {
-        "default": "quantity",
-        "M11_dental": "quantity",
-        "M11_vet": "quantity",
-        "M9_dental": "quantity",
-        "M9_vet": "quantity",
-        "204": "quantity",
-        "224": "quantity",
-        "ECG": "quantity",
-        "Digital_Vital_Signs": "quantity",
-        "250": "quantity",
-        "253": "quantity",
-        "255": "quantity",
-        "Preva": "quantity"
+            "Pipeline_Amount_MA3",
+        ],
     }
 
     # Backlog feature controls
@@ -113,10 +84,11 @@ class SARIMAConfig:
         "Backlog",
         "Backlog_Lag1",
         "Backlog_Lag3",
-        "Backlog_MA3"
+        "Backlog_MA3",
     ]
 
     ENFORCE_NON_NEGATIVE_FORECASTS = True
+    TRIM_TRAILING_ZERO_PADDING = True  # Keep trailing placeholder zeros out while preserving internal zeros
 
     # Seasonality detection thresholds
     SEASONALITY_THRESHOLD = 0.3  # Minimum seasonal component strength to consider seasonal
@@ -127,11 +99,12 @@ class SARIMAConfig:
     SAVE_RESULTS = True
     RESULTS_FILE = "sarima_forecast_results.csv"
     PLOTS_DIR = "plots"
+
     # Short-history non-seasonal ARIMA fallback
     SHORT_SERIES_ARIMA_ENABLED = True
     SHORT_SERIES_THRESHOLD = 24
     SHORT_SERIES_ARIMA_DEFAULT_ORDER = (1, 1, 1)
-    SHORT_SERIES_ARIMA_PARAMS = {}
+    SHORT_SERIES_ARIMA_PARAMS: Dict[str, Tuple[int, int, int]] = {}
 
     # Model selection thresholds
     SARIMA_MIN_HISTORY = 36
@@ -141,9 +114,192 @@ class SARIMAConfig:
     ETS_THETA_ENABLED = False
     ETS_THETA_WEIGHTS = (0.5, 0.5)
     ETS_THETA_PERIOD = 12
-    ETS_THETA_TREND = 'add'
+    ETS_THETA_TREND = "add"
     ETS_THETA_SEASONAL = None
     ETS_THETA_SEASONAL_PERIODS = None
     ETS_THETA_DAMPED = False
     ETS_THETA_FORCE_GROUPS = None
 
+    def __init__(self) -> None:
+        self.PRODUCT_GROUPS = {}
+        self.SARIMA_PARAMS = {}
+        self.BU_CODE_TO_NAME = {}
+        self.BU_NAME_TO_CODE = {}
+        self.BUSINESS_UNITS = ()
+        self.SALESFORCE_FEATURE_MODE_BY_GROUP = {}
+        self._skipped_groups: List[str] = []
+        self.managed_catalog_path = Path(self.MANAGED_CATALOG_FILE)
+
+        self._load_managed_catalog()
+
+        if self._skipped_groups:
+            print("Skipping product groups due to incomplete managed catalog rows:")
+            for message in self._skipped_groups:
+                print(f"  - {message}")
+
+        if not self.PRODUCT_GROUPS:
+            print(
+                f"Warning: No product groups loaded from {self.managed_catalog_path}. "
+                "Forecasting steps will be skipped."
+            )
+
+    def _load_managed_catalog(self) -> None:
+        """Populate catalog-driven metadata from CSV if available."""
+        path = self.managed_catalog_path
+        if not path.exists():
+            print(f"Warning: Managed catalog file not found at {path}")
+            return
+
+        try:
+            with path.open(newline="", encoding="utf-8-sig") as handle:
+                reader = csv.DictReader(handle)
+                if not reader.fieldnames:
+                    print(f"Warning: Managed catalog at {path} is missing a header row")
+                    return
+
+                missing_headers = [
+                    column for column in self.REQUIRED_CATALOG_COLUMNS if column not in reader.fieldnames
+                ]
+                if missing_headers:
+                    raise ValueError(
+                        f"Managed catalog missing required column(s): {', '.join(missing_headers)}"
+                    )
+
+                product_groups: Dict[str, List[str]] = {}
+                sarima_params: Dict[str, Tuple[int, int, int, int, int, int, int]] = {}
+                sf_modes: Dict[str, str] = {}
+                bu_code_to_name: Dict[str, str] = {}
+                bu_order: List[str] = []
+
+                for line_number, row in enumerate(reader, start=2):
+                    group_key = (row.get("group_key") or "").strip()
+                    label = group_key or f"row {line_number}"
+
+                    missing_values = [
+                        column
+                        for column in self.REQUIRED_CATALOG_COLUMNS
+                        if not self._has_value(row.get(column))
+                    ]
+                    if missing_values:
+                        self._skipped_groups.append(
+                            f"{label} (blank columns: {', '.join(missing_values)})"
+                        )
+                        continue
+
+                    sku_values = self._parse_catalog_list(row.get("sku_list"))
+                    if not sku_values:
+                        self._skipped_groups.append(f"{label} (no valid SKUs after parsing)")
+                        continue
+
+                    try:
+                        order = self._parse_sarima_order(row)
+                    except ValueError as exc:
+                        self._skipped_groups.append(f"{label} ({exc})")
+                        continue
+
+                    product_groups[group_key] = sku_values
+                    sarima_params[group_key] = order
+                    sf_mode = str(row.get("salesforce_feature_mode")).strip()
+                    sf_modes[group_key] = sf_mode
+
+                    bu_codes = self._parse_catalog_list(row.get("business_unit_code"))
+                    bu_names = self._parse_catalog_list(row.get("business_unit_name"))
+
+                    for index, code in enumerate(bu_codes):
+                        code_clean = code.strip()
+                        if not code_clean:
+                            continue
+
+                        name = bu_names[index] if index < len(bu_names) else ""
+                        name_clean = name.strip() if isinstance(name, str) else ""
+                        if not name_clean:
+                            name_clean = code_clean
+
+                        if code_clean not in bu_code_to_name:
+                            bu_order.append(code_clean)
+                        bu_code_to_name[code_clean] = name_clean
+
+                self.PRODUCT_GROUPS = product_groups
+                self.SARIMA_PARAMS = sarima_params
+                self.SALESFORCE_FEATURE_MODE_BY_GROUP = sf_modes
+
+                if bu_code_to_name:
+                    ordered_mapping = {code: bu_code_to_name[code] for code in bu_order}
+                    self.BU_CODE_TO_NAME = ordered_mapping
+                    self.BUSINESS_UNITS = tuple(ordered_mapping.keys())
+                    self.BU_NAME_TO_CODE = {name: code for code, name in ordered_mapping.items()}
+                else:
+                    self.BU_CODE_TO_NAME = {}
+                    self.BUSINESS_UNITS = ()
+                    self.BU_NAME_TO_CODE = {}
+        except ValueError:
+            raise
+        except Exception as exc:
+            print(f"Warning: Failed to load managed catalog from {path}: {exc}")
+
+    @staticmethod
+    def _parse_catalog_list(raw_value: Optional[Union[str, Iterable[str]]]) -> List[str]:
+        """
+        Accept delimited strings or iterables of values from the managed catalog.
+        Supports pipe, semicolon, and newline separated entries while preserving
+        intentional leading spaces on product codes.
+        """
+        if raw_value is None:
+            return []
+
+        if isinstance(raw_value, (list, tuple)):
+            return [
+                SARIMAConfig._preserve_spacing(value)
+                for value in raw_value
+                if value not in (None, "")
+            ]
+
+        text = str(raw_value)
+        if text == "":
+            return []
+
+        sanitized = text.replace("\r", "")
+        for delimiter in ("|", ";", "\n"):
+            if delimiter in sanitized:
+                parts = sanitized.split(delimiter)
+                break
+        else:
+            return [SARIMAConfig._preserve_spacing(sanitized)]
+
+        return [
+            SARIMAConfig._preserve_spacing(part)
+            for part in parts
+            if part not in (None, "")
+        ]
+
+    @staticmethod
+    def _preserve_spacing(value: Union[str, int, float]) -> str:
+        """Remove only trailing newline or carriage-return characters while keeping leading spaces."""
+        if value is None:
+            return ""
+        if not isinstance(value, str):
+            value = str(value)
+        return value.replace("\r", "").rstrip("\n")
+
+    @staticmethod
+    def _has_value(value: Optional[Union[str, int, float]]) -> bool:
+        """Return True when a catalog entry has a non-blank value."""
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        return True
+
+    def _parse_sarima_order(
+        self, row: Dict[str, Optional[str]]
+    ) -> Tuple[int, int, int, int, int, int, int]:
+        """Extract SARIMA order tuple from a catalog row."""
+        order_values: List[int] = []
+        for column in self.ORDER_COLUMN_NAMES:
+            raw = row.get(column) if row else None
+            try:
+                order_values.append(int(float(raw)))
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid SARIMA order value '{raw}' in column '{column}'") from exc
+
+        return tuple(order_values)

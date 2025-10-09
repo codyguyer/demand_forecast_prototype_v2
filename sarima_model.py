@@ -38,6 +38,7 @@ class SARIMAForecaster:
         self.series_metadata = {}
         self.salesforce_integration = None
         self.backlog_integration = None
+        self.exogenous_store = None
 
         if self.config.USE_SALESFORCE and getattr(self.config, "SALESFORCE_DATA_FILE", None):
             try:
@@ -58,6 +59,8 @@ class SARIMAForecaster:
             except Exception as exc:
                 print(f"Warning: Unable to initialize backlog integration: {exc}")
                 self.backlog_integration = None
+
+        self.precompute_exogenous_store()
 
     def _make_series_key(self, group_name, bu_code=None):
         """Create a unique key for a product group / BU combination."""
@@ -295,6 +298,151 @@ class SARIMAForecaster:
             combined = combined.reindex(index, fill_value=0.0)
 
         return combined.fillna(0.0)
+
+    def precompute_exogenous_store(self):
+        """Build a wide exogenous feature matrix keyed by (Date, group, BU)."""
+        stores = []
+
+        def build_store(processed_dict, source_prefix):
+            if not processed_dict:
+                return None
+
+            frames = []
+            for key, frame in processed_dict.items():
+                if frame is None or frame.empty:
+                    continue
+
+                local = frame.copy()
+                if 'Date' not in local.columns:
+                    local = local.reset_index()
+                    date_col = 'Date'
+                    if 'index' in local.columns and local['index'].dtype.kind == 'M':
+                        date_col = 'index'
+                    elif 'Month' in local.columns:
+                        date_col = 'Month'
+                    local = local.rename(columns={date_col: 'Date'})
+
+                local['Date'] = pd.to_datetime(local['Date'])
+
+                if isinstance(key, tuple):
+                    group_name, bu_code = key
+                else:
+                    group_name = key
+                    bu_code = ''
+
+                if pd.isna(bu_code):
+                    bu_code = ''
+                else:
+                    bu_code = str(bu_code).strip()
+
+                local['Product_Group'] = group_name
+                local['BU'] = bu_code
+                frames.append(local)
+
+            if not frames:
+                return None
+
+            store_df = pd.concat(frames, ignore_index=True)
+            store_df['BU'] = store_df['BU'].fillna('')
+            store_df = store_df.sort_values(['Date', 'Product_Group', 'BU'])
+
+            feature_cols = [
+                col for col in store_df.columns
+                if col not in ('Date', 'Product_Group', 'BU')
+            ]
+
+            if not feature_cols:
+                return None
+
+            prefixed_columns = {
+                col: f"{source_prefix}{col}"
+                for col in feature_cols
+            }
+
+            store_df = store_df.rename(columns=prefixed_columns)
+            ordered_cols = [prefixed_columns[col] for col in feature_cols]
+            store_df = store_df.set_index(['Date', 'Product_Group', 'BU'])[ordered_cols]
+            store_df.index.set_names(['Date', 'Product_Group', 'BU'], inplace=True)
+            return store_df.astype(float)
+
+        if self.salesforce_integration and getattr(self.salesforce_integration, "processed_features", None):
+            sf_store = build_store(self.salesforce_integration.processed_features, "sf_")
+            if sf_store is not None:
+                stores.append(sf_store)
+
+        if self.backlog_integration and getattr(self.backlog_integration, "processed_features", None):
+            backlog_store = build_store(self.backlog_integration.processed_features, "backlog_")
+            if backlog_store is not None:
+                stores.append(backlog_store)
+
+        if stores:
+            combined_store = pd.concat(stores, axis=1).fillna(0.0)
+            combined_store = combined_store.sort_index()
+            combined_store.index.set_names(['Date', 'Product_Group', 'BU'], inplace=True)
+            self.exogenous_store = combined_store
+        else:
+            self.exogenous_store = None
+
+    def get_exog_features_for_series(self, group_name, bu_code, target_index):
+        """Retrieve precomputed exogenous features for a given series and index."""
+        if self.exogenous_store is None:
+            return None
+
+        if pd.isna(bu_code):
+            bu_key = ''
+        else:
+            bu_key = str(bu_code).strip()
+
+        try:
+            series_matrix = self.exogenous_store.xs(
+                (group_name, bu_key),
+                level=('Product_Group', 'BU')
+            )
+        except KeyError:
+            return None
+
+        series_matrix = series_matrix.sort_index()
+
+        frames = []
+
+        def extract_and_filter(prefix, filter_fn, needs_group=False):
+            cols = [col for col in series_matrix.columns if col.startswith(prefix)]
+            if not cols:
+                return None
+            subset = series_matrix[cols].copy()
+            subset.columns = [col[len(prefix):] for col in cols]
+            if needs_group:
+                filtered = filter_fn(subset, group_name)
+            else:
+                filtered = filter_fn(subset)
+
+            if filtered is None or filtered.empty:
+                return None
+
+            filtered.columns = [f"{prefix}{col}" for col in filtered.columns]
+            return filtered
+
+        if self.salesforce_integration:
+            sf_filtered = extract_and_filter("sf_", self.filter_salesforce_features, needs_group=True)
+            if sf_filtered is not None:
+                frames.append(sf_filtered)
+
+        if self.backlog_integration:
+            backlog_filtered = extract_and_filter("backlog_", self.filter_backlog_features, needs_group=False)
+            if backlog_filtered is not None:
+                frames.append(backlog_filtered)
+
+        if not frames:
+            return None
+
+        combined = pd.concat(frames, axis=1).fillna(0.0)
+
+        if target_index is not None:
+            combined = combined.reindex(target_index, fill_value=0.0)
+
+        combined = combined.loc[:, sorted(combined.columns)]
+
+        return combined.astype(float)
 
     def analyze_seasonality(self, series, group_name, bu_code=None):
         """Analyze seasonality patterns in the data"""
@@ -759,6 +907,8 @@ class SARIMAForecaster:
 
         # Load and preprocess data
         self.load_and_preprocess_data()
+        # Ensure exogenous store aligns with latest configuration
+        self.precompute_exogenous_store()
 
         results_summary = []
 
@@ -779,7 +929,11 @@ class SARIMAForecaster:
 
             current_date = pd.to_datetime(self.config.CURRENT_MONTH)
             ts_data = ts_data[ts_data.index <= current_date]
-            ts_data = ts_data[ts_data > 0]  # Remove zero values at the end
+            if getattr(self.config, 'TRIM_TRAILING_ZERO_PADDING', True):
+                # Trim only trailing zeros that look like future padding, preserve internal zeros
+                nonzero_idx = np.where(ts_data.to_numpy() != 0)[0]
+                if nonzero_idx.size:
+                    ts_data = ts_data.iloc[: nonzero_idx[-1] + 1]
 
             if len(ts_data) < 12:
                 print(f"Warning: {label} has insufficient data. Skipping...")
@@ -793,75 +947,37 @@ class SARIMAForecaster:
             exog_features = None
             exog_future = None
 
-            exog_feature_frames = []
-            exog_future_frames = []
-            adjusted_series = ts_data
-
-            exog_sources = []
-            if self.salesforce_integration:
-                exog_sources.append(("Salesforce", self.salesforce_integration))
-            if self.backlog_integration:
-                exog_sources.append(("Backlog", self.backlog_integration))
-
-            if strategy != 'ETS_THETA' and exog_sources:
-                for source_name, integration in exog_sources:
-                    actuals_with_index = adjusted_series.to_frame(name='Actuals')
-                    try:
-                        merged_series, features = integration.merge_with_actuals(
-                            actuals_with_index, group_name, bu_code
-                        )
-                    except Exception as exc:
-                        print(f"Warning: Unable to merge {source_name.lower()} features for {label}: {exc}")
-                        continue
-
-                    if source_name == "Salesforce":
-                        features = self.filter_salesforce_features(features, group_name) if features is not None else None
-                    else:
-                        features = self.filter_backlog_features(features) if features is not None else None
-
-                    if features is not None and not features.empty:
-                        potential_future = integration.create_future_exog_features(
-                            group_name,
-                            forecast_start,
-                            self.config.FORECAST_MONTHS,
-                            bu_code
-                        )
-
-                        if source_name == "Salesforce":
-                            potential_future = self.filter_salesforce_features(potential_future, group_name) if potential_future is not None else None
-                        else:
-                            potential_future = self.filter_backlog_features(potential_future) if potential_future is not None else None
-
-                        if potential_future is not None and not potential_future.empty:
-                            potential_future = potential_future.reindex(columns=features.columns, fill_value=0.0)
-                            exog_feature_frames.append(features.astype(float))
-                            exog_future_frames.append(potential_future.astype(float).fillna(0.0))
-                            adjusted_series = merged_series.astype(float)
-                        else:
-                            print(f"{source_name} features lack future coverage for {label}; excluding this source.")
-                    else:
-                        print(f"{source_name} features unavailable or filtered out for {label}; excluding this source.")
-
-                if exog_feature_frames:
-                    exog_features = self.combine_exogenous_features(exog_feature_frames, index=ts_data.index)
-                    exog_future = self.combine_exogenous_features(exog_future_frames)
-                    if exog_features is not None and not exog_features.empty:
-                        exog_columns_used = list(exog_features.columns)
-                    else:
-                        exog_columns_used = []
-
-                    if exog_features is not None and exog_future is not None:
-                        missing_cols = [col for col in exog_features.columns if col not in exog_future.columns]
-                        for col in missing_cols:
-                            exog_future[col] = 0.0
-                        exog_future = exog_future[exog_features.columns]
-
-                    if exog_features is not None and (exog_future is None or exog_future.empty):
-                        print(f"Exogenous features missing forecast horizon coverage for {label}; proceeding without exogenous inputs.")
+            if strategy != 'ETS_THETA':
+                if self.exogenous_store is None:
+                    print("No precomputed exogenous features available; proceeding without exogenous inputs.")
+                else:
+                    exog_features = self.get_exog_features_for_series(group_name, bu_code, ts_data.index)
+                    if exog_features is None or exog_features.empty:
+                        print(f"No exogenous features found for {label}; proceeding without exogenous inputs.")
                         exog_features = None
-                        exog_future = None
-                        exog_columns_used = []
-                ts_data = adjusted_series.astype(float)
+                    else:
+                        future_index = pd.date_range(
+                            start=forecast_start,
+                            periods=self.config.FORECAST_MONTHS,
+                            freq='MS'
+                        )
+                        exog_future = self.get_exog_features_for_series(group_name, bu_code, future_index)
+
+                        if exog_future is None or exog_future.empty:
+                            print(f"Exogenous features missing forecast horizon coverage for {label}; proceeding without exogenous inputs.")
+                            exog_features = None
+                            exog_future = None
+                            exog_columns_used = []
+                        else:
+                            missing_cols = [col for col in exog_features.columns if col not in exog_future.columns]
+                            for col in missing_cols:
+                                exog_future[col] = 0.0
+                            exog_future = exog_future[exog_features.columns]
+                            exog_features = exog_features.astype(float)
+                            exog_future = exog_future.astype(float)
+                            exog_columns_used = list(exog_features.columns)
+
+            ts_data = ts_data.astype(float)
 
             if strategy == 'SARIMA':
                 # Analyze seasonality

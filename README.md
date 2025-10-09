@@ -3,7 +3,7 @@
 Enhanced SARIMA-based demand forecasting pipeline that can incorporate Salesforce pipeline data as exogenous drivers. The project is optimized for monthly product-group forecasting, produces metrics and plots, and can be extended with additional data sources.
 
 ## Features
-- Configurable SARIMA parameters per product group via `config.py`.
+- Managed product catalog (`managed_data/product_catalog.csv`) that is the single source of truth for product groups, BU mappings, SARIMA orders, and Salesforce feature modes.
 - Automatic aggregation of replacement products into consolidated demand series.
 - Optional Salesforce opportunity ingestion with lagged and rolling feature engineering.
 - SARIMAX training/testing with exogenous features when Salesforce data is present.
@@ -22,11 +22,16 @@ pip install -r requirements.txt
 ```
 
 ## Configuration
-Update `config.py` to control:
-- Data file paths and forecast horizon (`DATA_FILE`, `FORECAST_MONTHS`, `CURRENT_MONTH`).
-- Product group mappings (`PRODUCT_GROUPS`).
-- SARIMA parameter grids (`SARIMA_PARAMS`).
-- Salesforce integration toggle and field mapping (`USE_SALESFORCE`, `SALESFORCE_FIELDS`, `SALESFORCE_DATA_FILE`).
+Update configuration values in two places:
+- `config.py` for data file paths, forecast horizon (`DATA_FILE`, `FORECAST_MONTHS`, `CURRENT_MONTH`), and integration toggles (`USE_SALESFORCE`, `SALESFORCE_FIELDS`, `SALESFORCE_DATA_FILE`, backlog options, etc.).
+- `managed_data/product_catalog.csv` for every product-specific setting. If a row has any blank field, it is skipped at runtime and the product will not be forecast.
+
+### Managed catalog workflow
+1. Copy `managed_data/product_catalog.csv` to your preferred data store (CSV, database table, or SharePoint list) and keep the column structure.
+2. Maintain one row per product group with delimited values (pipe `|`, semicolon `;`, or newline) for multi-SKU groupings.
+3. Fill in the Salesforce feature mode (`salesforce_feature_mode`) for each product group (e.g., `quantity` or `dollars`); leaving it blank will skip the product.
+4. Provide SARIMA order columns (`sarima_p` through `sarima_s`) and BU mapping columns (`business_unit_code`, `business_unit_name`). Any blank field triggers a skip, so complete rows are required for inclusion.
+5. Restart scripts (or re-instantiate `SARIMAConfig`) after updating the catalog so the latest metadata loads before runtime.
 
 ## Usage
 Run the main forecasting pipeline:

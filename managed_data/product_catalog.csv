@@ -1,0 +1,13 @@
+group_key,business_unit_code,business_unit_name,sku_list,salesforce_feature_mode,sarima_p,sarima_d,sarima_q,sarima_P,sarima_D,sarima_Q,sarima_s
+M11_dental,D200,Dental,"     ITEM_M11-040|     ITEM_M11-050",quantity,1,0,1,1,0,0,12
+M11_vet,D300,"Animal Health","     ITEM_M11-043|     ITEM_M11-053",quantity,1,0,1,0,0,0,12
+M9_dental,D200,Dental,"     ITEM_M9-040|     ITEM_M9-050",quantity,0,0,1,1,0,0,12
+M9_vet,D300,"Animal Health","     ITEM_M9-043|     ITEM_M9-053",quantity,1,0,1,0,0,0,12
+204,D100,Medical,"Prod_204",quantity,1,1,1,0,0,0,12
+224,D100,Medical,"     Prod_224",quantity,0,1,1,0,0,0,12
+ECG,D100,Medical,"ITEM_4-000-0080",quantity,1,0,1,1,0,0,12
+Digital_Vital_Signs,D100,Medical,"     ITEM_4-000-0550",quantity,0,0,1,0,1,0,12
+250,D100,Medical,"PROD_50",quantity,1,1,1,0,1,0,12
+253,D100,Medical,"Prod_53",quantity,1,1,0,1,0,0,12
+255,D100,Medical,"prod_255",quantity,0,0,2,1,0,1,12
+Preva,D100,Medical,"Prod_21200",quantity,0,1,0,1,0,0,12

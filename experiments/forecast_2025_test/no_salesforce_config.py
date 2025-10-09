@@ -15,7 +15,7 @@ class Experiment2025NoSFConfig(SARIMAConfig):
     USE_BACKLOG = True
     BACKLOG_DATA_FILE = "experiments/forecast_2025_test/Backlog_2022_2024.csv"
     SAVE_RESULTS = True
-    OUTPUT_PLOTS = True
+    OUTPUT_PLOTS = False
     TEST_SPLIT_MONTHS = 6
     ENFORCE_NON_NEGATIVE_FORECASTS = True
     SHORT_SERIES_ARIMA_ENABLED = True
