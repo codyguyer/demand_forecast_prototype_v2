@@ -474,10 +474,24 @@ class SARIMAForecaster:
 
     def check_stationarity(self, series, group_name, bu_code=None):
         """Check if series is stationary using Augmented Dickey-Fuller test"""
-        result = adfuller(series.dropna())
-        p_value = result[1]
-
+        cleaned = series.dropna()
         label = self._format_series_label(group_name, bu_code)
+
+        if cleaned.nunique() <= 1:
+            print(f"Stationarity test for {label}: constant series, treating as stationary")
+            return True
+
+        if len(cleaned) < 3:
+            print(f"Stationarity test for {label}: insufficient data, treating as stationary")
+            return True
+
+        try:
+            result = adfuller(cleaned)
+        except ValueError as exc:
+            print(f"Warning: ADF failed for {label}: {exc}. Treating as stationary")
+            return True
+
+        p_value = result[1]
         print(f"Stationarity test for {label}: p-value = {p_value:.4f}")
         is_stationary = p_value < 0.05
         print(f"{label} is {'stationary' if is_stationary else 'non-stationary'}")

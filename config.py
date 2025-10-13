@@ -38,7 +38,7 @@ class SARIMAConfig:
     CURRENT_MONTH = "2025-09"  # Use last fully completed month
     USE_SALESFORCE = False
     SALESFORCE_DATA_FILE = "salesforce_data.csv"
-    USE_BACKLOG = True  # [ln(t)-ln(t-1)]*0.1 and do not include any future months
+    USE_BACKLOG = False  # [ln(t)-ln(t-1)]*0.1 and do not include any future months
     BACKLOG_DATA_FILE = "Backlog.csv"
     FORECAST_BY_BU = True
 
