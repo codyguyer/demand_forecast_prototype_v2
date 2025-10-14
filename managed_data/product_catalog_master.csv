@@ -21,11 +21,10 @@ Vaporizers,D300,Animal Health,Prod_5740,quantity,0,1,1,1,1,0,12
 Sodasorb,D300,Animal Health,prod_5797,quantity,1,1,0,0,0,0,12
 CMDT-45,D300,Animal Health,          ITEM_CMDT-45,quantity,1,0,0,1,0,1,12
 CMDT-60,D300,Animal Health,          ITEM_CMDT-60,quantity,2,1,0,1,0,1,12
-5860,D300,Animal Health,     Prod_5860,quantity,0,1,0,1,0,0,12
-7231,D300,Animal Health,     Prod_7231,quantity,0,1,0,0,1,0,12
-7335,D300,Animal Health,     Prod_7335,quantity,1,0,0,0,0,0,12
-7336,D300,Animal Health,     Prod_7336,quantity,1,1,2,1,1,1,12
-7333,D300,Animal Health,     Prod_7333,quantity,0,1,0,0,1,0,12
-7337,D300,Animal Health,     Prod_7337,quantity,1,0,1,1,0,1,12
-7234,D300,Animal Health,     Prod_7234,quantity,1,0,0,0,0,0,12
-5840,D300,Animal Health,     Prod_5840,quantity,0,1,2,1,1,1,12
+Synthesis Fixed Height Tables,D300,Animal Health,     Prod_5860,quantity,0,1,0,1,0,0,12
+Stainless Steel Fixed Height Tables,D300,Animal Health,     Prod_7231,quantity,0,1,0,0,1,0,12
+Flat Top Surgery Table,D300,Animal Health,     Prod_7335,quantity,1,0,0,0,0,0,12
+V-Top Surgery Table,D300,Animal Health,     Prod_7336,quantity,1,1,2,1,1,1,12
+Stationary Fold-Up Lift Table,D300,Animal Health,     Prod_7333,quantity,0,1,0,0,1,0,12
+Tapered Electric,D300,Animal Health,     Prod_7337,quantity,1,0,1,1,0,1,12
+Fold-Up,D300,Animal Health,     Prod_7234,quantity,1,0,0,0,0,0,12

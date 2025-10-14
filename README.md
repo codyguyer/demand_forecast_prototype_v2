@@ -23,7 +23,7 @@ pip install -r requirements.txt
 
 ## Configuration
 Update configuration values in two places:
-- `config.py` for data file paths, forecast horizon (`DATA_FILE`, `FORECAST_MONTHS`, `CURRENT_MONTH`), and integration toggles (`USE_SALESFORCE`, `SALESFORCE_FIELDS`, `SALESFORCE_DATA_FILE`, backlog options, etc.).
+- `config.py` for data file paths (defaults point to `managed_data/Actuals.csv`, `managed_data/Backlog.csv`, and `managed_data/salesforce_data.csv`), forecast horizon (`DATA_FILE`, `FORECAST_MONTHS`, `CURRENT_MONTH`), and integration toggles (`USE_SALESFORCE`, `SALESFORCE_FIELDS`, `SALESFORCE_DATA_FILE`, backlog options, etc.).
 - `managed_data/product_catalog.csv` for every product-specific setting. If a row has any blank field, it is skipped at runtime and the product will not be forecast.
 
 ### Managed catalog workflow
@@ -57,7 +57,7 @@ python auto_select_orders.py
 The selector writes a detailed report to `sarima_order_selection_results.csv` (MAE per fold, AICc, warnings, Ljung-Box p-values) and prints a JSON snippet with the recommended `(p, d, q, P, D, Q, m)` tuple for each series. Use those tuples to update `SARIMA_PARAMS` in `config.py` once you are comfortable with the diagnostics.
 
 ## Salesforce Data Expectations
-`salesforce_data.csv` should include the following columns (or the names mapped in `config.py`):
+`managed_data/salesforce_data.csv` should include the following columns (or the names mapped in `config.py`):
 - Product Code
 - Weighted Pipeline Dollars
 - Weighted Pipeline Quantity

@@ -14,7 +14,8 @@ class SARIMAConfig:
     """Configuration class for SARIMA model parameters backed by a managed catalog."""
 
     BASE_DIR = Path(__file__).resolve().parent
-    MANAGED_CATALOG_FILE = BASE_DIR / "managed_data" / "product_catalog.csv"
+    MANAGED_DATA_DIR = BASE_DIR / "managed_data"
+    MANAGED_CATALOG_FILE = MANAGED_DATA_DIR / "product_catalog.csv"
     ORDER_COLUMN_NAMES: Tuple[str, ...] = (
         "sarima_p",
         "sarima_d",
@@ -33,13 +34,13 @@ class SARIMAConfig:
     ) + ORDER_COLUMN_NAMES
 
     # Data configuration
-    DATA_FILE = "Actuals.csv"
+    DATA_FILE = str(MANAGED_DATA_DIR / "Actuals.csv")
     FORECAST_MONTHS = 12
     CURRENT_MONTH = "2025-09"  # Use last fully completed month
     USE_SALESFORCE = False
-    SALESFORCE_DATA_FILE = "salesforce_data.csv"
-    USE_BACKLOG = False  # [ln(t)-ln(t-1)]*0.1 and do not include any future months
-    BACKLOG_DATA_FILE = "Backlog.csv"
+    SALESFORCE_DATA_FILE = str(MANAGED_DATA_DIR / "salesforce_data.csv")
+    USE_BACKLOG = False  # [ln(t)-ln(t-1)]*0.1 or (z-mean)/std and do not include any future months
+    BACKLOG_DATA_FILE = str(MANAGED_DATA_DIR / "Backlog.csv")
     FORECAST_BY_BU = True
 
     # Managed metadata containers populated at runtime
