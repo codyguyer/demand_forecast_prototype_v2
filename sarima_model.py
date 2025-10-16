@@ -439,6 +439,8 @@ class SARIMAForecaster:
 
         if target_index is not None:
             combined = combined.reindex(target_index, fill_value=0.0)
+            if combined.empty or np.isclose(combined.abs().sum().sum(), 0.0):
+                return None
 
         combined = combined.loc[:, sorted(combined.columns)]
 

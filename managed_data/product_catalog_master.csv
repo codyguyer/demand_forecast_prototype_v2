@@ -1,30 +1,30 @@
-group_key,business_unit_code,business_unit_name,sku_list,salesforce_feature_mode,sarima_p,sarima_d,sarima_q,sarima_P,sarima_D,sarima_Q,sarima_s
-M11_dental,D200,Dental,          ITEM_M11-040|          ITEM_M11-050,quantity,1,0,1,1,0,0,12
-M11_vet,D300,Animal Health,          ITEM_M11-043|          ITEM_M11-053,quantity,1,0,1,0,0,0,12
-M9_dental,D200,Dental,          ITEM_M9-040|          ITEM_M9-050,quantity,0,0,1,1,0,0,12
-M9_vet,D300,Animal Health,          ITEM_M9-043|          ITEM_M9-053,quantity,1,0,1,0,0,0,12
-204,D100,Medical,     Prod_204,quantity,1,1,1,0,0,0,12
-224,D100,Medical,          Prod_224,quantity,0,1,1,0,0,0,12
-ECG,D100,Medical,          ITEM_4-000-0080,quantity,1,0,1,1,0,0,12
-Digital_Vital_Signs,D100,Medical,               ITEM_4-000-0550,quantity,0,0,1,0,1,0,12
-250,D100,Medical,PROD_50,quantity,1,1,1,0,1,0,12
-253,D100,Medical,Prod_53,quantity,1,1,0,1,0,0,12
-255,D300,Animal Health,prod_255,quantity,0,0,2,1,0,1,12
-Preva,D200,Dental,Prod_21200,quantity,0,1,0,1,0,0,12
-VMR,D300,Animal Health,     Prod_5725,quantity,1,1,2,0,1,1,12
-Scavengers,D300,Animal Health,     Prod_5726,quantity,1,1,0,1,0,1,12
-Ventilators,D300,Animal Health,     Prod_5750,quantity,1,1,2,0,1,1,12
-VMS,D300,Animal Health,Prod_5720,quantity,0,1,2,1,1,1,12
-VMS_Plus,D300,Animal Health,Prod_5721,quantity,2,0,2,0,0,0,12
-VME2,D300,Animal Health,Prod_5722,quantity,0,1,1,0,1,1,12
-Vaporizers,D300,Animal Health,Prod_5740,quantity,0,1,1,1,1,0,12
-Sodasorb,D300,Animal Health,prod_5797,quantity,1,1,0,0,0,0,12
-CMDT-45,D300,Animal Health,          ITEM_CMDT-45,quantity,1,0,0,1,0,1,12
-CMDT-60,D300,Animal Health,          ITEM_CMDT-60,quantity,2,1,0,1,0,1,12
-Synthesis Fixed Height Tables,D300,Animal Health,     Prod_5860,quantity,0,1,0,1,0,0,12
-Stainless Steel Fixed Height Tables,D300,Animal Health,     Prod_7231,quantity,0,1,0,0,1,0,12
-Flat Top Surgery Table,D300,Animal Health,     Prod_7335,quantity,1,0,0,0,0,0,12
-V-Top Surgery Table,D300,Animal Health,     Prod_7336,quantity,1,1,2,1,1,1,12
-Stationary Fold-Up Lift Table,D300,Animal Health,     Prod_7333,quantity,0,1,0,0,1,0,12
-Tapered Electric,D300,Animal Health,     Prod_7337,quantity,1,0,1,1,0,1,12
-Fold-Up,D300,Animal Health,     Prod_7234,quantity,1,0,0,0,0,0,12
+group_key,business_unit_code,business_unit_name,sku_list,salesforce_feature_mode,sarima_p,sarima_d,sarima_q,sarima_P,sarima_D,sarima_Q,sarima_s,sf_quantity_new_orders_lag,sf_quantity_lag,sf_new_quotes_lag,sf_open_opportunities_lag,sf_revenue_lag,sf_revenue_new_orders_lag
+204,D100,Medical,     Prod_204,quantity,1,1,1,0,0,0,12,2,1,4,,,
+224,D100,Medical,          Prod_224,quantity,0,1,1,0,0,0,12,2,1,5,,,
+250,D100,Medical,PROD_50,quantity,1,1,1,0,1,0,12,2,3,2,,,
+253,D100,Medical,Prod_53,quantity,1,1,0,1,0,0,12,0,1,3,,,
+255,D300,Animal Health,prod_255,quantity,0,0,2,1,0,1,12,3,0,6,,,
+CMDT-45,D300,Animal Health,          ITEM_CMDT-45,quantity,1,0,0,1,0,1,12,3,5,3,,,
+CMDT-60,D300,Animal Health,          ITEM_CMDT-60,quantity,2,1,0,1,0,1,12,5,6,2,,,
+Digital_Vital_Signs,D100,Medical,               ITEM_4-000-0550,quantity,0,0,1,0,1,0,12,3,3,2,,,
+ECG,D100,Medical,          ITEM_4-000-0080,quantity,1,0,1,1,0,0,12,6,6,6,,,
+Flat Top Surgery Table,D300,Animal Health,     Prod_7335,quantity,1,0,0,0,0,0,12,2,0,0,,,
+Fold-Up,D300,Animal Health,     Prod_7234,quantity,1,0,0,0,0,0,12,2,0,0,,,
+M11_dental,D200,Dental,          ITEM_M11-040|          ITEM_M11-050,quantity,1,0,1,1,0,0,12,3,0,2,,,
+M11_vet,D300,Animal Health,          ITEM_M11-043|          ITEM_M11-053,quantity,1,0,1,0,0,0,12,0,4,4,,,
+M9_dental,D200,Dental,          ITEM_M9-040|          ITEM_M9-050,quantity,0,0,1,1,0,0,12,2,4,3,,,
+M9_vet,D300,Animal Health,          ITEM_M9-043|          ITEM_M9-053,quantity,1,0,1,0,0,0,12,4,6,4,,,
+Preva,D200,Dental,Prod_21200,quantity,0,1,0,1,0,0,12,6,6,0,,,
+Scavengers,D300,Animal Health,     Prod_5726,quantity,1,1,0,1,0,1,12,5,2,3,,,
+Sodasorb,D300,Animal Health,prod_5797,quantity,1,1,0,0,0,0,12,0,0,0,,,
+Stainless Steel Fixed Height Tables,D300,Animal Health,     Prod_7231,quantity,0,1,0,0,1,0,12,0,0,3,,,
+Stationary Fold-Up Lift Table,D300,Animal Health,     Prod_7333,quantity,0,1,0,0,1,0,12,3,0,0,,,
+Synthesis Fixed Height Tables,D300,Animal Health,     Prod_5860,quantity,0,1,0,1,0,0,12,0,0,0,,,
+Tapered Electric,D300,Animal Health,     Prod_7337,quantity,1,0,1,1,0,1,12,6,1,6,,,
+Vaporizers,D300,Animal Health,Prod_5740,quantity,0,1,1,1,1,0,12,5,5,1,,,
+Ventilators,D300,Animal Health,     Prod_5750,quantity,1,1,2,0,1,1,12,2,2,2,,,
+VME2,D300,Animal Health,Prod_5722,quantity,0,1,1,0,1,1,12,3,3,3,,,
+VMR,D300,Animal Health,     Prod_5725,quantity,1,1,2,0,1,1,12,0,0,0,,,
+VMS,D300,Animal Health,Prod_5720,quantity,0,1,2,1,1,1,12,6,6,4,,,
+VMS_Plus,D300,Animal Health,Prod_5721,quantity,2,0,2,0,0,0,12,3,3,6,,,
+V-Top Surgery Table,D300,Animal Health,     Prod_7336,quantity,1,1,2,1,1,1,12,2,2,2,,,

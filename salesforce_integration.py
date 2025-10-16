@@ -70,6 +70,10 @@ class SalesforceIntegration:
             "Quantity_new_orders",
         )
         self.available_feature_columns: List[str] = []
+        self.salesforce_lags: Dict[str, Dict[str, Dict[str, int]]] = getattr(
+            self.config, "SALESFORCE_LAGS_BY_GROUP", {}
+        ) or {}
+        self.salesforce_lags = getattr(self.config, "SALESFORCE_LAGS_BY_GROUP", {}) or {}
 
     def _resolve_reference_path(self) -> Optional[Path]:
         raw_path = getattr(self.config, "SALESFORCE_REFERENCE_FILE", None)
@@ -243,6 +247,50 @@ class SalesforceIntegration:
             return self.normalized_sku_lookup[normalized]
 
         return None
+
+    def _resolve_feature_lag(self, group_name: str, feature_name: str, bu_code: Optional[str]) -> int:
+        """Return the configured lag for a feature, if any."""
+        if not self.salesforce_lags:
+            return 0
+
+        group_config = self.salesforce_lags.get(group_name)
+        if not group_config:
+            return 0
+
+        feature_config = group_config.get(feature_name)
+        if not feature_config:
+            return 0
+
+        if bu_code not in (None, ""):
+            key = str(bu_code).strip()
+            if key in feature_config:
+                return int(feature_config[key])
+
+        if "default" in feature_config:
+            return int(feature_config["default"])
+        if "" in feature_config:
+            return int(feature_config[""])
+        return 0
+
+    def _apply_configured_lags(
+        self,
+        group_name: str,
+        bu_code: Optional[str],
+        frame: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Apply configured lags to the Salesforce feature frame."""
+        if not self.salesforce_lags:
+            return frame
+
+        lagged = frame.copy()
+        for column in lagged.columns:
+            if column == "Date":
+                continue
+            lag_value = self._resolve_feature_lag(group_name, column, bu_code)
+            if lag_value <= 0:
+                continue
+            lagged[column] = lagged[column].shift(lag_value).fillna(0.0)
+        return lagged
 
     def _finalize_feature_frame(
         self, frame: pd.DataFrame, feature_columns: Sequence[str]
@@ -468,6 +516,7 @@ class SalesforceIntegration:
                     )
                     if feature_frame is None or feature_frame.empty:
                         continue
+                    feature_frame = self._apply_configured_lags(group_name, bu_code, feature_frame)
                     processed[(group_name, bu_code)] = feature_frame
                     observed_columns.update(col for col in feature_frame.columns if col != "Date")
                     readable_bu = self.bu_code_to_name.get(bu_code, bu_code)
@@ -483,6 +532,7 @@ class SalesforceIntegration:
                 )
                 if feature_frame is None or feature_frame.empty:
                     continue
+                feature_frame = self._apply_configured_lags(group_name, None, feature_frame)
                 processed[group_name] = feature_frame
                 observed_columns.update(col for col in feature_frame.columns if col != "Date")
                 print(
@@ -582,6 +632,14 @@ class SalesforceIntegration:
             future_df = future_df.fillna(0.0)
             label = f"{group_name} ({readable_bu})" if readable_bu else group_name
             print(f"Filled missing Salesforce feature values with zeros for {label} forecast horizon")
+
+        if future_df.empty or (future_df.abs().sum().sum() == 0.0):
+            label = f"{group_name} ({readable_bu})" if readable_bu else group_name
+            print(
+                f"No non-zero Salesforce features available for {label} forecast horizon; "
+                "falling back to SARIMA without exogenous inputs."
+            )
+            return None
 
         label = f"{group_name} ({readable_bu})" if readable_bu else group_name
         print(f"Created future external features for {label} using Salesforce pipeline data")

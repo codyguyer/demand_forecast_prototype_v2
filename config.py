@@ -37,7 +37,7 @@ class SARIMAConfig:
     DATA_FILE = str(MANAGED_DATA_DIR / "Actuals.csv")
     FORECAST_MONTHS = 12
     CURRENT_MONTH = "2025-09"  # Use last fully completed month
-    USE_SALESFORCE = False
+    USE_SALESFORCE = True
     SALESFORCE_DATA_FILE = str(MANAGED_DATA_DIR / "salesforce_data_v2.csv")
     SALESFORCE_REFERENCE_FILE = str(MANAGED_DATA_DIR / "sf_product_reference_key.csv")
     USE_BACKLOG = False  # [ln(t)-ln(t-1)]*0.1 or (z-mean)/std and do not include any future months
@@ -51,6 +51,7 @@ class SARIMAConfig:
     PRODUCT_GROUPS: Dict[str, List[str]] = {}
     SARIMA_PARAMS: Dict[str, Tuple[int, int, int, int, int, int, int]] = {}
     SALESFORCE_FEATURE_MODE_BY_GROUP: Dict[str, str] = {}
+    SALESFORCE_LAGS_BY_GROUP: Dict[str, Dict[str, Dict[str, int]]] = {}
     GROUP_TO_BU_CODES: Dict[str, Tuple[str, ...]] = {}
     SKU_TO_GROUP_MAP: Dict[str, str] = {}
 
@@ -77,6 +78,14 @@ class SARIMAConfig:
         "default": ["Quantity", "New_Quotes", "Quantity_new_orders"],
     }
     SALESFORCE_DIFFERENCE_FEATURES = False
+    SALESFORCE_LAG_COLUMN_MAP = {
+        "sf_quantity_lag": "Quantity",
+        "sf_new_quotes_lag": "New_Quotes",
+        "sf_open_opportunities_lag": "Open_Opportunities",
+        "sf_revenue_lag": "Revenue",
+        "sf_revenue_new_orders_lag": "Revenue_new_orders",
+        "sf_quantity_new_orders_lag": "Quantity_new_orders",
+    }
 
     # Backlog feature controls
     BACKLOG_FEATURES = [
@@ -126,6 +135,7 @@ class SARIMAConfig:
         self.BU_NAME_TO_CODE = {}
         self.BUSINESS_UNITS = ()
         self.SALESFORCE_FEATURE_MODE_BY_GROUP = {}
+        self.SALESFORCE_LAGS_BY_GROUP = {}
         self.GROUP_TO_BU_CODES = {}
         self.SKU_TO_GROUP_MAP = {}
         self._skipped_groups: List[str] = []
@@ -154,6 +164,7 @@ class SARIMAConfig:
         try:
             group_to_bu_codes: Dict[str, List[str]] = {}
             sku_to_group_map: Dict[str, str] = {}
+            salesforce_lags: Dict[str, Dict[str, Dict[str, int]]] = {}
 
             with path.open(newline="", encoding="utf-8-sig") as handle:
                 reader = csv.DictReader(handle)
@@ -206,6 +217,10 @@ class SARIMAConfig:
                     sf_mode = str(row.get("salesforce_feature_mode")).strip()
                     sf_modes[group_key] = sf_mode
 
+                    lag_map = self._parse_salesforce_lag_row(row)
+                    if lag_map:
+                        salesforce_lags[group_key] = lag_map
+
                     if sku_values:
                         for sku_entry in sku_values:
                             sku_clean = sku_entry.strip()
@@ -236,6 +251,7 @@ class SARIMAConfig:
                 self.PRODUCT_GROUPS = product_groups
                 self.SARIMA_PARAMS = sarima_params
                 self.SALESFORCE_FEATURE_MODE_BY_GROUP = sf_modes
+                self.SALESFORCE_LAGS_BY_GROUP = salesforce_lags
 
                 if bu_code_to_name:
                     ordered_mapping = {code: bu_code_to_name[code] for code in bu_order}
@@ -326,3 +342,65 @@ class SARIMAConfig:
                 raise ValueError(f"invalid SARIMA order value '{raw}' in column '{column}'") from exc
 
         return tuple(order_values)
+
+    def _parse_salesforce_lag_row(self, row: Dict[str, Optional[str]]) -> Dict[str, Dict[str, int]]:
+        """Parse optional Salesforce lag columns for a catalog row."""
+        lag_columns = getattr(self, "SALESFORCE_LAG_COLUMN_MAP", None)
+        if not isinstance(lag_columns, dict) or not lag_columns:
+            return {}
+
+        feature_mapping: Dict[str, Dict[str, int]] = {}
+        for column_name, feature_name in lag_columns.items():
+            raw_value = row.get(column_name) if row else None
+            if not self._has_value(raw_value):
+                continue
+
+            parsed = self._parse_salesforce_lag_value(raw_value)
+            if parsed:
+                feature_mapping[feature_name] = parsed
+
+        return feature_mapping
+
+    @staticmethod
+    def _parse_salesforce_lag_value(raw_value: Optional[Union[str, int, float]]) -> Dict[str, int]:
+        """Parse a Salesforce lag entry supporting BU-specific overrides."""
+        if raw_value is None:
+            return {}
+
+        if isinstance(raw_value, (int, float)):
+            try:
+                return {"default": int(raw_value)}
+            except (TypeError, ValueError):
+                return {}
+
+        text = str(raw_value).strip()
+        if not text:
+            return {}
+
+        normalized = text.replace("\r", "")
+        for delimiter in ("|", ";", "\n"):
+            if delimiter in normalized:
+                parts = [part.strip() for part in normalized.split(delimiter) if part.strip()]
+                break
+        else:
+            parts = [normalized]
+
+        mapping: Dict[str, int] = {}
+        for part in parts:
+            if ":" in part:
+                bu_code, lag_value = part.split(":", 1)
+                bu_clean = bu_code.strip()
+                lag_clean = lag_value.strip()
+                if not bu_clean or not lag_clean:
+                    continue
+                try:
+                    mapping[bu_clean] = int(float(lag_clean))
+                except (TypeError, ValueError):
+                    continue
+            else:
+                try:
+                    mapping["default"] = int(float(part))
+                except (TypeError, ValueError):
+                    continue
+
+        return mapping
