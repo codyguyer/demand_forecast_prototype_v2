@@ -1,31 +1,31 @@
 group_key,salesforce_product_name
 204,204
 224,224
-5860,5860
 250,250 - Medical
 250,250 Exam Light
 253,253 - Medical
 255,255 - Medical
 255,255 LED Procedure Light
+255,Dental Lighting - 255
+5860,5860
 CMDT-45,CMDT-45
 CMDT-60,CMDT-60
-255,Dental Lighting - 255
+Digital_Vital_Signs,Iqvitals 4-000-0550
+ECG,IQecg - 4 000 0080
 Flat Top Surgery Table,Flat Top Surgery Table - All Models
 Fold-Up,Fold-Up - All Models
-Stationary Fold-Up Lift Table,Fold-up Lift Table - All Models
-Preva,Imaging - Preva
 M11_dental,Instrument Processing - M11
-M9_dental,Instrument Processing - M9
-ECG,IQecg - 4 000 0080
-Digital_Vital_Signs,Iqvitals 4-000-0550
 M11_vet,M11-043
 M11_vet,M11-053
+M9_dental,Instrument Processing - M9
 M9_vet,M9-043
 M9_vet,M9-053
+Preva,Imaging - Preva
 Scavengers,Scavenger
 Scavengers,Scavengers - All Models
 Sodasorb,Sodasorb
 Stainless Steel Fixed Height Tables,Stainless Steel Fixed Height Tables
+Stationary Fold-Up Lift Table,Fold-up Lift Table - All Models
 Synthesis Fixed Height Tables,Synthesis Fixed Height Tables - All Models
 Tapered Electric,Tapered Electric - All Models
 Vaporizers,Vaporizer

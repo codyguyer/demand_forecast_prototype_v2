@@ -37,8 +37,9 @@ class SARIMAConfig:
     DATA_FILE = str(MANAGED_DATA_DIR / "Actuals.csv")
     FORECAST_MONTHS = 12
     CURRENT_MONTH = "2025-09"  # Use last fully completed month
-    USE_SALESFORCE = False
-    SALESFORCE_DATA_FILE = str(MANAGED_DATA_DIR / "salesforce_data.csv")
+    USE_SALESFORCE = True
+    SALESFORCE_DATA_FILE = str(MANAGED_DATA_DIR / "salesforce_data_v2.csv")
+    SALESFORCE_REFERENCE_FILE = str(MANAGED_DATA_DIR / "sf_product_reference_key.csv")
     USE_BACKLOG = False  # [ln(t)-ln(t-1)]*0.1 or (z-mean)/std and do not include any future months
     BACKLOG_DATA_FILE = str(MANAGED_DATA_DIR / "Backlog.csv")
     FORECAST_BY_BU = True
@@ -57,28 +58,23 @@ class SARIMAConfig:
 
     # Future Salesforce integration parameters
     SALESFORCE_FIELDS = {
-        "product": "Product Code",
-        "weighted_pipeline_dollars": "Weighted Pipeline Dollars",
-        "weighted_pipeline_quantity": "Weighted Pipeline Quantity",
-        "close_date": "Close Date",
-        "business_unit": "Business Unit",
+        "timestamp": "Timestamp",
+        "product_name": "SF_Product_Name",
+        "business_unit": "BU",
+        "revenue": "Revenue",
+        "quantity": "Quantity",
+        "new_quotes": "New_Quotes",
+        "revenue_new_orders": "Revenue_new_orders",
+        "quantity_new_orders": "Quantity_new_orders",
     }
 
     # Salesforce feature controls
     SALESFORCE_FEATURE_COLUMN_SETS = {
-        "quantity": [
-            "Weighted_Pipeline_Quantity",
-            "Pipeline_Quantity_Lag1",
-            "Pipeline_Quantity_Lag3",
-            "Pipeline_Quantity_MA3",
-        ],
-        "dollars": [
-            "Weighted_Pipeline_Amount",
-            "Pipeline_Amount_Lag1",
-            "Pipeline_Amount_Lag3",
-            "Pipeline_Amount_MA3",
-        ],
+        "quantity": ["Quantity", "New_Quotes", "Quantity_new_orders"],
+        "dollars": ["Revenue", "New_Quotes", "Revenue_new_orders"],
+        "default": ["Quantity", "New_Quotes", "Quantity_new_orders"],
     }
+    SALESFORCE_DIFFERENCE_FEATURES = False
 
     # Backlog feature controls
     BACKLOG_FEATURES = [
