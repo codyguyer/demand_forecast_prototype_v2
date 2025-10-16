@@ -37,7 +37,7 @@ class SARIMAConfig:
     DATA_FILE = str(MANAGED_DATA_DIR / "Actuals.csv")
     FORECAST_MONTHS = 12
     CURRENT_MONTH = "2025-09"  # Use last fully completed month
-    USE_SALESFORCE = True
+    USE_SALESFORCE = False
     SALESFORCE_DATA_FILE = str(MANAGED_DATA_DIR / "salesforce_data_v2.csv")
     SALESFORCE_REFERENCE_FILE = str(MANAGED_DATA_DIR / "sf_product_reference_key.csv")
     USE_BACKLOG = False  # [ln(t)-ln(t-1)]*0.1 or (z-mean)/std and do not include any future months
@@ -51,6 +51,8 @@ class SARIMAConfig:
     PRODUCT_GROUPS: Dict[str, List[str]] = {}
     SARIMA_PARAMS: Dict[str, Tuple[int, int, int, int, int, int, int]] = {}
     SALESFORCE_FEATURE_MODE_BY_GROUP: Dict[str, str] = {}
+    GROUP_TO_BU_CODES: Dict[str, Tuple[str, ...]] = {}
+    SKU_TO_GROUP_MAP: Dict[str, str] = {}
 
     # Model evaluation parameters
     CONFIDENCE_LEVEL = 0.90  # 90% confidence intervals (approx 1.645 std dev)
@@ -124,6 +126,8 @@ class SARIMAConfig:
         self.BU_NAME_TO_CODE = {}
         self.BUSINESS_UNITS = ()
         self.SALESFORCE_FEATURE_MODE_BY_GROUP = {}
+        self.GROUP_TO_BU_CODES = {}
+        self.SKU_TO_GROUP_MAP = {}
         self._skipped_groups: List[str] = []
         self.managed_catalog_path = Path(self.MANAGED_CATALOG_FILE)
 
@@ -148,6 +152,9 @@ class SARIMAConfig:
             return
 
         try:
+            group_to_bu_codes: Dict[str, List[str]] = {}
+            sku_to_group_map: Dict[str, str] = {}
+
             with path.open(newline="", encoding="utf-8-sig") as handle:
                 reader = csv.DictReader(handle)
                 if not reader.fieldnames:
@@ -199,6 +206,12 @@ class SARIMAConfig:
                     sf_mode = str(row.get("salesforce_feature_mode")).strip()
                     sf_modes[group_key] = sf_mode
 
+                    if sku_values:
+                        for sku_entry in sku_values:
+                            sku_clean = sku_entry.strip()
+                            if sku_clean and sku_clean not in sku_to_group_map:
+                                sku_to_group_map[sku_clean] = group_key
+
                     bu_codes = self._parse_catalog_list(row.get("business_unit_code"))
                     bu_names = self._parse_catalog_list(row.get("business_unit_name"))
 
@@ -211,6 +224,10 @@ class SARIMAConfig:
                         name_clean = name.strip() if isinstance(name, str) else ""
                         if not name_clean:
                             name_clean = code_clean
+
+                        existing_codes = group_to_bu_codes.setdefault(group_key, [])
+                        if code_clean not in existing_codes:
+                            existing_codes.append(code_clean)
 
                         if code_clean not in bu_code_to_name:
                             bu_order.append(code_clean)
@@ -229,6 +246,15 @@ class SARIMAConfig:
                     self.BU_CODE_TO_NAME = {}
                     self.BUSINESS_UNITS = ()
                     self.BU_NAME_TO_CODE = {}
+
+                if group_to_bu_codes:
+                    self.GROUP_TO_BU_CODES = {
+                        group: tuple(codes) for group, codes in group_to_bu_codes.items()
+                    }
+                else:
+                    self.GROUP_TO_BU_CODES = {}
+
+                self.SKU_TO_GROUP_MAP = sku_to_group_map
         except ValueError:
             raise
         except Exception as exc:

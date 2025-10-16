@@ -6,6 +6,8 @@ Future enhancement to incorporate pipeline data as external regressors
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 from statsmodels.tsa.statespace.sarimax import SARIMAX
 from config import SARIMAConfig
 
@@ -32,67 +34,370 @@ class SalesforceIntegration:
         self.pipeline_data = None
         self.processed_features = None
         self.forecast_by_bu = bool(getattr(self.config, "FORECAST_BY_BU", False))
-        self.bu_name_to_code = {str(k).strip().lower(): v for k, v in getattr(self.config, "BU_NAME_TO_CODE", {}).items()}
+        self.bu_name_to_code = {
+            str(k).strip().lower(): v for k, v in getattr(self.config, "BU_NAME_TO_CODE", {}).items()
+        }
         self.bu_code_to_name = getattr(self.config, "BU_CODE_TO_NAME", {})
+        self.group_key_lookup = {
+            str(key).strip(): str(key).strip()
+            for key in getattr(self.config, "PRODUCT_GROUPS", {}).keys()
+            if str(key).strip()
+        }
+        self.group_key_lower_lookup = {key.lower(): original for original, key in self.group_key_lookup.items()}
+        self.group_to_bu_codes = {
+            group: tuple(codes)
+            for group, codes in getattr(self.config, "GROUP_TO_BU_CODES", {}).items()
+        }
+        raw_sku_lookup = getattr(self.config, "SKU_TO_GROUP_MAP", {}) or {}
+        self.raw_sku_lookup = {str(sku).strip(): group for sku, group in raw_sku_lookup.items() if str(sku).strip()}
+        self.normalized_sku_lookup = {
+            self.normalize_product_code(sku): group
+            for sku, group in self.raw_sku_lookup.items()
+            if self.normalize_product_code(sku)
+        }
+        self.reference_lookup = self._build_reference_lookup()
+        self.normalized_reference_lookup = {
+            self.normalize_product_code(name): group
+            for name, group in self.reference_lookup.items()
+            if self.normalize_product_code(name)
+        }
+        self.base_feature_columns: Sequence[str] = (
+            "Revenue",
+            "Quantity",
+            "Open_Opportunities",
+            "New_Quotes",
+            "Revenue_new_orders",
+            "Quantity_new_orders",
+        )
+        self.available_feature_columns: List[str] = []
+
+    def _resolve_reference_path(self) -> Optional[Path]:
+        raw_path = getattr(self.config, "SALESFORCE_REFERENCE_FILE", None)
+        if not raw_path:
+            return None
+        try:
+            path = Path(raw_path)
+        except TypeError:
+            return None
+        if not path.is_absolute():
+            path = Path(self.config.BASE_DIR) / path
+        if not path.exists():
+            print(f"Warning: Salesforce reference file not found at {path}")
+            return None
+        return path
+
+    def _build_reference_lookup(self) -> Dict[str, str]:
+        path = self._resolve_reference_path()
+        if path is None:
+            return {}
+        try:
+            reference_df = pd.read_csv(path)
+        except Exception as exc:
+            print(f"Warning: Failed to load Salesforce reference table from {path}: {exc}")
+            return {}
+
+        mapping: Dict[str, str] = {}
+        valid_groups = set(self.group_key_lookup.keys())
+        for row in reference_df.itertuples():
+            group_raw = getattr(row, "group_key", None)
+            name_raw = getattr(row, "salesforce_product_name", None)
+            if not isinstance(group_raw, str) or not isinstance(name_raw, str):
+                continue
+            group = group_raw.strip()
+            name = name_raw.strip()
+            if not group or not name:
+                continue
+            if valid_groups and group not in valid_groups:
+                continue
+            key = name.lower()
+            if key and key not in mapping:
+                mapping[key] = group
+        return mapping
+
+    def _standardize_columns(self, dataframe: pd.DataFrame) -> pd.DataFrame:
+        if dataframe is None:
+            return dataframe
+
+        working = dataframe.copy()
+        fields = getattr(self.config, "SALESFORCE_FIELDS", {}) or {}
+
+        canonical_targets = {
+            "timestamp": "Timestamp",
+            "product": "SF_Product_Name",
+            "product_name": "SF_Product_Name",
+            "business_unit": "Business_Unit_Code",
+            "revenue": "Revenue",
+            "quantity": "Quantity",
+            "open_opportunities": "Open_Opportunities",
+            "new_quotes": "New_Quotes",
+            "revenue_new_orders": "Revenue_new_orders",
+            "quantity_new_orders": "Quantity_new_orders",
+        }
+
+        fallback_sources = {
+            "timestamp": ["Timestamp", "CloseDate", "Date"],
+            "product": ["Product", "SF_Product_Name", "Product_Name"],
+            "product_name": ["Product", "SF_Product_Name", "Product_Name"],
+            "business_unit": ["Business_Unit_Code", "Business_Unit", "BU", "Business_Unit_Name"],
+            "revenue": ["Revenue", "Weighted_Pipeline_Amount", "Weighted_Pipeline_Dollars"],
+            "quantity": ["Quantity", "Weighted_Pipeline_Quantity"],
+            "open_opportunities": ["Open_Opportunities"],
+            "new_quotes": ["New_Quotes"],
+            "revenue_new_orders": ["Revenue_new_orders"],
+            "quantity_new_orders": ["Quantity_new_orders"],
+        }
+
+        rename_map: Dict[str, str] = {}
+
+        def candidate_sources(key: str) -> List[str]:
+            configured = fields.get(key)
+            candidates: List[str] = []
+            if isinstance(configured, str):
+                candidates.append(configured)
+            if key == "product":
+                alt = fields.get("product_name")
+                if isinstance(alt, str):
+                    candidates.append(alt)
+            if key == "product_name":
+                alt = fields.get("product")
+                if isinstance(alt, str):
+                    candidates.append(alt)
+            candidates.extend(fallback_sources.get(key, []))
+            return [candidate for candidate in candidates if candidate]
+
+        for key, target in canonical_targets.items():
+            for candidate in candidate_sources(key):
+                if candidate in working.columns:
+                    rename_map[candidate] = target
+                    break
+
+        if "BU" in working.columns and "Business_Unit_Code" not in rename_map and "Business_Unit_Code" not in working.columns:
+            rename_map["BU"] = "Business_Unit_Code"
+
+        working = working.rename(columns=rename_map)
+
+        if "SF_Product_Name" not in working.columns and "Product" in working.columns:
+            working = working.rename(columns={"Product": "SF_Product_Name"})
+
+        if "Business_Unit_Code" not in working.columns and "Business_Unit_Name" in working.columns:
+            working["Business_Unit_Code"] = working["Business_Unit_Name"]
+
+        if "BU" not in working.columns and "Business_Unit_Code" in working.columns:
+            working["BU"] = working["Business_Unit_Code"]
+
+        return working
+
+    def _normalize_business_unit(self, value) -> Optional[str]:
+        if pd.isna(value):
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        if text in self.bu_code_to_name:
+            return text
+        lookup_key = text.lower()
+        if lookup_key in self.bu_name_to_code:
+            return self.bu_name_to_code[lookup_key]
+        return text.upper()
+
+    def _filter_valid_business_units(self, dataframe: pd.DataFrame) -> pd.DataFrame:
+        if not self.forecast_by_bu:
+            return dataframe
+        if not self.group_to_bu_codes:
+            return dataframe
+
+        def is_valid(row) -> bool:
+            codes = self.group_to_bu_codes.get(row["group_key"])
+            if not codes:
+                return True
+            return row["Business_Unit_Code"] in codes
+
+        mask = dataframe.apply(is_valid, axis=1)
+        dropped = int((~mask).sum())
+        if dropped:
+            print(f"Dropping {dropped} Salesforce rows with BUs not present in managed catalog")
+        return dataframe[mask]
+
+    def _resolve_group_key(self, product_name: Optional[str]) -> Optional[str]:
+        if product_name in (None, ""):
+            return None
+        text = str(product_name).strip()
+        if not text:
+            return None
+
+        lookup_key = text.lower()
+        if lookup_key in self.reference_lookup:
+            return self.reference_lookup[lookup_key]
+
+        normalized = self.normalize_product_code(text)
+        if normalized and normalized in self.normalized_reference_lookup:
+            return self.normalized_reference_lookup[normalized]
+
+        if lookup_key in self.group_key_lower_lookup:
+            return self.group_key_lower_lookup[lookup_key]
+
+        if text in self.raw_sku_lookup:
+            return self.raw_sku_lookup[text]
+
+        if normalized and normalized in self.normalized_sku_lookup:
+            return self.normalized_sku_lookup[normalized]
+
+        return None
+
+    def _finalize_feature_frame(
+        self, frame: pd.DataFrame, feature_columns: Sequence[str]
+    ) -> Optional[pd.DataFrame]:
+        if frame is None or frame.empty:
+            return None
+
+        trimmed = frame.copy()
+        if "Date" not in trimmed.columns:
+            return None
+        trimmed = trimmed.dropna(subset=["Date"])
+        if trimmed.empty:
+            return None
+
+        trimmed = trimmed.sort_values("Date").drop_duplicates("Date", keep="last")
+        trimmed = trimmed.set_index("Date")
+
+        start = trimmed.index.min()
+        end_data = trimmed.index.max()
+
+        current_month_raw = getattr(self.config, "CURRENT_MONTH", None)
+        if current_month_raw:
+            try:
+                config_end = pd.to_datetime(current_month_raw)
+            except Exception:
+                config_end = end_data
+        else:
+            config_end = end_data
+
+        end = max(end_data, config_end)
+
+        month_index = pd.date_range(start=start, end=end, freq="MS")
+        completed = trimmed.reindex(month_index, fill_value=0.0)
+
+        completed = completed.astype(float)
+
+        if getattr(self.config, "SALESFORCE_DIFFERENCE_FEATURES", False):
+            for column in feature_columns:
+                if column in completed.columns:
+                    diff_col = f"{column}_Diff"
+                    completed[diff_col] = completed[column].diff().fillna(0.0)
+
+        completed = completed.reset_index().rename(columns={"index": "Date"})
+        return completed
 
     def load_salesforce_data(self, filepath_or_data):
         """
         Load Salesforce opportunity data
-        Expected columns: Product, Weighted_Pipeline_Amount, Weighted_Pipeline_Quantity, CloseDate
+        Align columns, map to managed catalog group keys, and normalise business units.
         """
         if isinstance(filepath_or_data, str):
-            # Load from file
-            self.pipeline_data = pd.read_csv(filepath_or_data)
+            data_path = Path(filepath_or_data)
+            self.pipeline_data = pd.read_csv(data_path)
         else:
-            # Use provided DataFrame
             self.pipeline_data = filepath_or_data.copy()
 
-        # Standardize column names
-        fields = getattr(self.config, "SALESFORCE_FIELDS", {})
-        column_mapping = {}
-        mappings = [
-            (fields.get('product'), 'Product'),
-            (fields.get('weighted_pipeline_dollars'), 'Weighted_Pipeline_Amount'),
-            (fields.get('weighted_pipeline_quantity'), 'Weighted_Pipeline_Quantity'),
-            (fields.get('close_date'), 'CloseDate'),
-            (fields.get('business_unit'), 'Business_Unit_Name')
+        self.pipeline_data = self._standardize_columns(self.pipeline_data)
+
+        if "Timestamp" not in self.pipeline_data.columns:
+            raise ValueError("Salesforce data must include a timestamp column after standardisation.")
+        if "SF_Product_Name" not in self.pipeline_data.columns:
+            raise ValueError("Salesforce data must include product identifiers after standardisation.")
+
+        self.pipeline_data["Timestamp"] = pd.to_datetime(
+            self.pipeline_data["Timestamp"], errors="coerce"
+        )
+        self.pipeline_data = self.pipeline_data.dropna(subset=["Timestamp"])
+        if self.pipeline_data.empty:
+            print("Warning: Salesforce dataset is empty after parsing timestamps.")
+            return self.pipeline_data
+
+        self.pipeline_data["Timestamp"] = (
+            self.pipeline_data["Timestamp"].dt.to_period("M").dt.to_timestamp()
+        )
+        self.pipeline_data["Date"] = self.pipeline_data["Timestamp"]
+        self.pipeline_data["SF_Product_Name"] = (
+            self.pipeline_data["SF_Product_Name"].astype(str).str.strip()
+        )
+
+        self.pipeline_data["group_key"] = self.pipeline_data["SF_Product_Name"].apply(
+            self._resolve_group_key
+        )
+        missing_mask = self.pipeline_data["group_key"].isna()
+        if missing_mask.any():
+            missing_names = (
+                self.pipeline_data.loc[missing_mask, "SF_Product_Name"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .unique()
+            )
+            print(
+                f"Warning: Salesforce records without a group_key mapping ({len(missing_names)} unique names). These rows will be dropped."
+            )
+            self.pipeline_data = self.pipeline_data[~missing_mask]
+
+        if self.pipeline_data.empty:
+            print("Warning: No Salesforce records remain after mapping product group keys.")
+            return self.pipeline_data
+
+        if "Business_Unit_Code" not in self.pipeline_data.columns:
+            self.pipeline_data["Business_Unit_Code"] = self.pipeline_data.get("BU")
+
+        self.pipeline_data["Business_Unit_Code"] = self.pipeline_data["Business_Unit_Code"].apply(
+            self._normalize_business_unit
+        )
+        self.pipeline_data = self.pipeline_data.dropna(subset=["Business_Unit_Code"])
+        if self.pipeline_data.empty:
+            print("Warning: No Salesforce records remain after aligning business units.")
+            return self.pipeline_data
+
+        self.pipeline_data["Business_Unit_Code"] = (
+            self.pipeline_data["Business_Unit_Code"].astype(str).str.strip()
+        )
+        self.pipeline_data["BU"] = self.pipeline_data["Business_Unit_Code"]
+
+        self.pipeline_data = self._filter_valid_business_units(self.pipeline_data)
+        if self.pipeline_data.empty:
+            print("Warning: No Salesforce records remain after filtering invalid BU assignments.")
+            return self.pipeline_data
+
+        numeric_columns = [
+            col
+            for col in self.pipeline_data.columns
+            if col in self.base_feature_columns
         ]
-        for source, target in mappings:
-            if source and source in self.pipeline_data.columns:
-                column_mapping[source] = target
+        # Include any additional numeric columns that may be useful for experiments
+        additional_numeric = [
+            col
+            for col in self.pipeline_data.columns
+            if col
+            not in {
+                "Timestamp",
+                "Date",
+                "SF_Product_Name",
+                "Business_Unit_Code",
+                "BU",
+                "group_key",
+            }
+            and col not in numeric_columns
+            and pd.api.types.is_numeric_dtype(self.pipeline_data[col])
+        ]
+        numeric_columns.extend(additional_numeric)
 
-        self.pipeline_data = self.pipeline_data.rename(columns=column_mapping)
-        self.pipeline_data['CloseDate'] = pd.to_datetime(self.pipeline_data['CloseDate'])
+        for column in numeric_columns:
+            self.pipeline_data[column] = pd.to_numeric(
+                self.pipeline_data[column], errors="coerce"
+            ).fillna(0.0)
 
-        if 'Product' in self.pipeline_data.columns:
-            self.pipeline_data['Product'] = self.pipeline_data['Product'].astype(str)
-            self.pipeline_data['Normalized_Product'] = self.pipeline_data['Product'].apply(self.normalize_product_code)
-        else:
-            self.pipeline_data['Normalized_Product'] = ''
-            print('Warning: Salesforce data missing Product column; normalization skipped.')
+        coverage_start = self.pipeline_data["Date"].min().strftime("%Y-%m")
+        coverage_end = self.pipeline_data["Date"].max().strftime("%Y-%m")
+        print(
+            f"Loaded {len(self.pipeline_data)} Salesforce records covering {coverage_start} through {coverage_end}"
+        )
 
-        if 'Business_Unit_Name' in self.pipeline_data.columns:
-            def map_bu(value):
-                if pd.isna(value):
-                    return None
-                text = str(value).strip()
-                lower = text.lower()
-                if text in self.bu_code_to_name:
-                    return text
-                return self.bu_name_to_code.get(lower, text)
-
-            self.pipeline_data['Business_Unit_Code'] = self.pipeline_data['Business_Unit_Name'].apply(map_bu)
-        elif 'Business_Unit_Code' in self.pipeline_data.columns:
-            self.pipeline_data['Business_Unit_Code'] = self.pipeline_data['Business_Unit_Code'].astype(str).str.strip()
-        elif 'BU' in self.pipeline_data.columns:
-            self.pipeline_data['Business_Unit_Code'] = self.pipeline_data['BU'].astype(str).str.strip()
-        else:
-            self.pipeline_data['Business_Unit_Code'] = None
-
-        if self.forecast_by_bu and self.pipeline_data['Business_Unit_Code'].isnull().all():
-            print("Warning: Salesforce data lacks business unit information; BU-level exogenous features will be unavailable.")
-
-        print(f"Loaded {len(self.pipeline_data)} Salesforce opportunities")
         return self.pipeline_data
 
     def process_pipeline_features(self, product_groups):
@@ -101,86 +406,97 @@ class SalesforceIntegration:
         """
         print("Processing Salesforce pipeline features...")
 
-        processed = {}
-
         if self.pipeline_data is None or self.pipeline_data.empty:
             print('No Salesforce pipeline data available to process.')
             self.processed_features = {}
             return {}
 
-        if 'Normalized_Product' not in self.pipeline_data.columns and 'Product' in self.pipeline_data.columns:
-            self.pipeline_data['Normalized_Product'] = self.pipeline_data['Product'].apply(self.normalize_product_code)
+        valid_groups = set(product_groups.keys())
+        working = self.pipeline_data[self.pipeline_data["group_key"].isin(valid_groups)].copy()
 
-        forecast_horizon_end = pd.to_datetime(self.config.CURRENT_MONTH) + pd.DateOffset(months=self.config.FORECAST_MONTHS)
+        if working.empty:
+            print("Warning: Salesforce data did not match any configured product groups.")
+            self.processed_features = {}
+            self.available_feature_columns = []
+            return {}
 
-        def build_feature_frame(pipeline_df):
-            if pipeline_df.empty:
-                return None
+        feature_columns = [col for col in self.base_feature_columns if col in working.columns]
+        additional_numeric = [
+            col
+            for col in working.columns
+            if col not in feature_columns + ["Date", "Timestamp", "group_key", "Business_Unit_Code", "BU", "SF_Product_Name"]
+            and pd.api.types.is_numeric_dtype(working[col])
+        ]
+        feature_columns = list(dict.fromkeys(feature_columns + additional_numeric))
 
-            local_copy = pipeline_df.copy()
-            local_copy['YearMonth'] = local_copy['CloseDate'].dt.to_period('M')
+        if not feature_columns:
+            print("Warning: No numeric Salesforce feature columns available after alignment.")
+            self.processed_features = {}
+            self.available_feature_columns = []
+            return {}
 
-            monthly_agg = local_copy.groupby('YearMonth')[['Weighted_Pipeline_Amount', 'Weighted_Pipeline_Quantity']].sum()
-            if monthly_agg.empty:
-                return None
+        aggregated = (
+            working.groupby(["group_key", "Business_Unit_Code", "Date"], as_index=False)[feature_columns]
+            .sum()
+            .sort_values(["group_key", "Business_Unit_Code", "Date"])
+        )
 
-            monthly_agg.index = monthly_agg.index.to_timestamp(how='start')
+        processed: Dict = {}
+        observed_columns: set[str] = set()
 
-            full_index = pd.date_range(
-                start=monthly_agg.index.min(),
-                end=forecast_horizon_end,
-                freq='MS'
-            )
-
-            monthly_agg = monthly_agg.reindex(full_index, fill_value=0.0)
-            monthly_agg.index.name = 'Date'
-
-            monthly_agg['Pipeline_Amount_Lag1'] = monthly_agg['Weighted_Pipeline_Amount'].shift(1)
-            monthly_agg['Pipeline_Amount_Lag3'] = monthly_agg['Weighted_Pipeline_Amount'].shift(3)
-            monthly_agg['Pipeline_Quantity_Lag1'] = monthly_agg['Weighted_Pipeline_Quantity'].shift(1)
-            monthly_agg['Pipeline_Quantity_Lag3'] = monthly_agg['Weighted_Pipeline_Quantity'].shift(3)
-
-            monthly_agg['Pipeline_Amount_MA3'] = monthly_agg['Weighted_Pipeline_Amount'].rolling(window=3, min_periods=1).mean()
-            monthly_agg['Pipeline_Quantity_MA3'] = monthly_agg['Weighted_Pipeline_Quantity'].rolling(window=3, min_periods=1).mean()
-
-            return monthly_agg.fillna(0.0).reset_index()
-
-        for group_name, products in product_groups.items():
+        for group_name in product_groups.keys():
             print(f"Processing pipeline data for {group_name}")
-
-            normalized_targets = {self.normalize_product_code(p) for p in products}
-
-            # Filter pipeline data for this product group
-            group_pipeline = self.pipeline_data[
-                self.pipeline_data['Normalized_Product'].isin(normalized_targets)
-            ].copy()
-
-            if len(group_pipeline) == 0:
-                print(f"No pipeline data found for {group_name} after normalization: {sorted(normalized_targets)}")
+            group_slice = aggregated[aggregated["group_key"] == group_name]
+            if group_slice.empty:
+                print(f"No Salesforce data found for group {group_name}.")
                 continue
 
-            missing_codes = normalized_targets.difference(set(group_pipeline['Normalized_Product'].unique()))
-            if missing_codes:
-                print(f"Partial Salesforce coverage for {group_name}; missing normalized codes: {sorted(missing_codes)}")
-
-            if self.forecast_by_bu and 'Business_Unit_Code' in group_pipeline.columns:
-                grouped = group_pipeline.groupby('Business_Unit_Code')
-                for bu_code, bu_slice in grouped:
-                    if pd.isna(bu_code) or bu_slice.empty:
+            if self.forecast_by_bu:
+                bu_codes = (
+                    group_slice["Business_Unit_Code"]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .unique()
+                    .tolist()
+                )
+                bu_codes.sort()
+                for bu_code in bu_codes:
+                    bu_slice = group_slice[group_slice["Business_Unit_Code"] == bu_code]
+                    feature_frame = self._finalize_feature_frame(
+                        bu_slice.loc[:, ["Date"] + feature_columns], feature_columns
+                    )
+                    if feature_frame is None or feature_frame.empty:
                         continue
-                    features_frame = build_feature_frame(bu_slice)
-                    if features_frame is None:
-                        continue
-                    processed[(group_name, bu_code)] = features_frame
+                    processed[(group_name, bu_code)] = feature_frame
+                    observed_columns.update(col for col in feature_frame.columns if col != "Date")
                     readable_bu = self.bu_code_to_name.get(bu_code, bu_code)
-                    print(f"  -> Features prepared for BU {bu_code} ({readable_bu}) with {len(features_frame)} rows")
+                    print(
+                        f"Prepared Salesforce feature frame for {group_name} ({readable_bu}) with {len(feature_frame)} monthly observations"
+                    )
             else:
-                features_frame = build_feature_frame(group_pipeline)
-                if features_frame is None:
+                combined_slice = (
+                    group_slice.groupby("Date", as_index=False)[feature_columns].sum()
+                )
+                feature_frame = self._finalize_feature_frame(
+                    combined_slice.loc[:, ["Date"] + feature_columns], feature_columns
+                )
+                if feature_frame is None or feature_frame.empty:
                     continue
-                processed[group_name] = features_frame
+                processed[group_name] = feature_frame
+                observed_columns.update(col for col in feature_frame.columns if col != "Date")
+                print(
+                    f"Prepared Salesforce feature frame for {group_name} with {len(feature_frame)} monthly observations"
+                )
+
+        if not processed:
+            print("Warning: Salesforce pipeline data did not yield any usable feature frames.")
+            self.processed_features = {}
+            self.available_feature_columns = []
+            return {}
 
         self.processed_features = processed
+        self.available_feature_columns = sorted(observed_columns)
         return processed
 
 
@@ -297,19 +613,13 @@ class SalesforceIntegration:
 
         # Ensure all expected feature columns exist and fill missing values
         feature_columns = [
-            'Weighted_Pipeline_Amount', 'Weighted_Pipeline_Quantity',
-            'Pipeline_Amount_Lag1', 'Pipeline_Amount_Lag3',
-            'Pipeline_Quantity_Lag1', 'Pipeline_Quantity_Lag3',
-            'Pipeline_Amount_MA3', 'Pipeline_Quantity_MA3'
+            col for col in features_df.columns if col != 'Date'
         ]
 
         merged = merged.sort_values('Month')
 
         for col in feature_columns:
-            if col not in merged.columns:
-                merged[col] = 0.0
-            else:
-                merged[col] = merged[col].fillna(0)
+            merged[col] = pd.to_numeric(merged.get(col, 0.0), errors='coerce').fillna(0.0)
 
         merged = merged.set_index('Month')
 
