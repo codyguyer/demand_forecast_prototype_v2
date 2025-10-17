@@ -626,23 +626,60 @@ class SalesforceIntegration:
             freq='MS'
         )
 
-        future_df = features_df.reindex(forecast_index)
+        if forecast_months <= 0:
+            return None
 
-        if future_df.isnull().any().any():
-            future_df = future_df.fillna(0.0)
-            label = f"{group_name} ({readable_bu})" if readable_bu else group_name
-            print(f"Filled missing Salesforce feature values with zeros for {label} forecast horizon")
+        history_cutoff = forecast_index[0]
+        history_df = features_df[features_df.index < history_cutoff]
 
-        if future_df.empty or (future_df.abs().sum().sum() == 0.0):
+        if history_df.empty:
             label = f"{group_name} ({readable_bu})" if readable_bu else group_name
             print(
-                f"No non-zero Salesforce features available for {label} forecast horizon; "
+                f"Insufficient Salesforce history for {label}; "
+                "falling back to SARIMA without exogenous inputs."
+            )
+            return None
+
+        weights = np.array([0.10, 0.10, 0.15, 0.15, 0.25, 0.25])
+        future_data: Dict[str, List[float]] = {}
+
+        for column in history_df.columns:
+            history_series = history_df[column].dropna()
+            if len(history_series) < 6:
+                label = f"{group_name} ({readable_bu})" if readable_bu else group_name
+                print(
+                    f"Not enough Salesforce history (>=6 months) for feature '{column}' on {label}; "
+                    "falling back to SARIMA without exogenous inputs."
+                )
+                return None
+
+            recent_values = history_series.iloc[-6:].tolist()
+            generated: List[float] = []
+
+            for _ in range(forecast_months):
+                tail = recent_values[-6:]
+                weighted_value = float(np.dot(tail, weights))
+                generated.append(weighted_value)
+                recent_values.append(weighted_value)
+                recent_values = recent_values[-6:]
+
+            future_data[column] = generated
+
+        future_df = pd.DataFrame(future_data, index=forecast_index)
+        future_df = future_df.astype(float)
+
+        if future_df.empty:
+            label = f"{group_name} ({readable_bu})" if readable_bu else group_name
+            print(
+                f"Unable to generate Salesforce features for {label} forecast horizon; "
                 "falling back to SARIMA without exogenous inputs."
             )
             return None
 
         label = f"{group_name} ({readable_bu})" if readable_bu else group_name
-        print(f"Created future external features for {label} using Salesforce pipeline data")
+        print(
+            f"Created future external features for {label} using trailing weighted Salesforce averages"
+        )
 
         return future_df
 

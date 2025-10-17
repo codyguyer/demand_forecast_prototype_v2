@@ -419,6 +419,31 @@ class SARIMAForecaster:
             if filtered is None or filtered.empty:
                 return None
 
+            if (
+                needs_group
+                and self.salesforce_integration
+                and target_index is not None
+                and len(target_index) > 0
+            ):
+                requested_start = target_index[0]
+                last_available = filtered.index.max()
+                if last_available is None or requested_start > last_available:
+                    forecast_months = len(target_index)
+                    future_df = self.salesforce_integration.create_future_exog_features(
+                        group_name,
+                        requested_start,
+                        forecast_months,
+                        bu_code,
+                    )
+                    if future_df is None:
+                        return None
+
+                    future_subset = future_df.reindex(target_index)
+                    future_subset = future_subset[filtered.columns.intersection(future_subset.columns)]
+                    future_subset = future_subset.fillna(method="ffill").fillna(method="bfill")
+                    combined_future = pd.concat([filtered, future_subset], axis=0)
+                    filtered = combined_future.loc[~combined_future.index.duplicated(keep="last")]
+
             filtered.columns = [f"{prefix}{col}" for col in filtered.columns]
             return filtered
 
