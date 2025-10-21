@@ -60,6 +60,18 @@ class CandidateResult:
 
 
 @dataclass
+class CandidateInitialScore:
+    """Initial fit metrics used to shortlist SARIMA candidates."""
+
+    order: Tuple[int, int, int]
+    seasonal_order: Tuple[int, int, int, int]
+    aicc: float
+    pseudo_mae_last: float
+    warnings: List[str]
+    full_fit: Any
+
+
+@dataclass
 class SeriesSelectionResult:
     """Final selection payload per product series."""
 
@@ -123,6 +135,9 @@ class SARIMAOrderSelector:
         ljung_box_lags: Sequence[int] = (12,),
         fallback_theta_period: Optional[int] = 12,
         volatility_threshold: float = 0.5,
+        shortlist_top_k: int = 3,
+        shortlist_extended_k: int = 5,
+        shortlist_extended_min_obs: int = 48,
     ) -> None:
         self.data = data.copy()
         self.product_groups = product_groups
@@ -143,6 +158,9 @@ class SARIMAOrderSelector:
         self.ljung_box_lags = tuple(ljung_box_lags)
         self.fallback_theta_period = fallback_theta_period
         self.volatility_threshold = volatility_threshold
+        self.shortlist_top_k = max(1, int(shortlist_top_k))
+        self.shortlist_extended_k = max(self.shortlist_top_k, int(shortlist_extended_k))
+        self.shortlist_extended_min_obs = max(1, int(shortlist_extended_min_obs))
 
         self._prepare_data()
 
@@ -176,7 +194,26 @@ class SARIMAOrderSelector:
     def _prepare_data(self) -> None:
         """Ensure date column is datetime and values are numeric."""
         if not np.issubdtype(self.data[self.date_col].dtype, np.datetime64):
-            self.data[self.date_col] = pd.to_datetime(self.data[self.date_col])
+            raw_dates = self.data[self.date_col]
+            parsed_dates = pd.to_datetime(raw_dates, errors="coerce")
+            if parsed_dates.isna().any():
+                numeric_mask = pd.to_numeric(raw_dates, errors="coerce").notna()
+                if numeric_mask.any():
+                    excel_converted = pd.to_datetime(
+                        pd.to_numeric(raw_dates[numeric_mask]),
+                        unit="D",
+                        origin="1899-12-30",
+                    )
+                    parsed_dates.loc[numeric_mask] = excel_converted
+
+            if parsed_dates.isna().any():
+                bad_examples = list(map(str, raw_dates[parsed_dates.isna()].unique()[:5]))
+                raise ValueError(
+                    f"Unable to parse {self.date_col!r} values into datetimes; examples: {', '.join(bad_examples)}"
+                )
+
+            self.data[self.date_col] = parsed_dates
+
         self.data = self.data.sort_values([self.product_col, self.date_col])
         self.data[self.value_col] = pd.to_numeric(self.data[self.value_col], errors="coerce").fillna(0.0)
 
@@ -244,20 +281,35 @@ class SARIMAOrderSelector:
             return fallback
 
         candidates = self._generate_candidates(len(series), is_volatile=is_volatile)
-        candidate_results: List[CandidateResult] = []
+        initial_scores: List[CandidateInitialScore] = []
 
         for order, seasonal_order in candidates:
+            initial_score = self._initial_candidate_score(series, order, seasonal_order)
+            if initial_score:
+                initial_scores.append(initial_score)
+
+        if not initial_scores:
+            fallback = self._fallback_forecast(series, series_key, reason="initial_screen_failed")
+            return fallback
+
+        shortlist_limit = self._determine_shortlist_size(len(series), is_volatile=is_volatile)
+        initial_scores.sort(key=self._candidate_initial_sort_key)
+        shortlisted = initial_scores[:shortlist_limit]
+
+        candidate_results: List[CandidateResult] = []
+        for shortlisted_score in shortlisted:
             candidate_result = self._evaluate_candidate(
                 series,
-                order,
-                seasonal_order,
+                shortlisted_score.order,
+                shortlisted_score.seasonal_order,
                 is_volatile=is_volatile,
+                prefit=shortlisted_score,
             )
             if candidate_result:
                 candidate_results.append(candidate_result)
 
         if not candidate_results:
-            fallback = self._fallback_forecast(series, series_key, reason="all_candidates_failed")
+            fallback = self._fallback_forecast(series, series_key, reason="shortlist_evaluation_failed")
             return fallback
 
         best_candidate = self._select_best_candidate(candidate_results, is_volatile=is_volatile)
@@ -409,6 +461,61 @@ class SARIMAOrderSelector:
         candidates = matched + unmatched
         return candidates
 
+    def _determine_shortlist_size(self, n_obs: int, *, is_volatile: bool) -> int:
+        """Determine how many candidates to keep for cross-validation."""
+        if is_volatile or n_obs < self.shortlist_extended_min_obs:
+            return self.shortlist_extended_k
+        return self.shortlist_top_k
+
+    @staticmethod
+    def _candidate_initial_sort_key(score: CandidateInitialScore) -> Tuple[Any, ...]:
+        """Ordering key for initial candidate screen."""
+        aicc = score.aicc if np.isfinite(score.aicc) else float("inf")
+        pseudo_mae = score.pseudo_mae_last if np.isfinite(score.pseudo_mae_last) else float("inf")
+        complexity = sum(score.order) + sum(score.seasonal_order[:3])
+        return (aicc, pseudo_mae, complexity, score.order, score.seasonal_order[:3])
+
+    def _initial_candidate_score(
+        self,
+        series: pd.Series,
+        order: Tuple[int, int, int],
+        seasonal_order: Tuple[int, int, int, int],
+    ) -> Optional[CandidateInitialScore]:
+        """Fit a candidate once to collect metrics for shortlist ranking."""
+        full_fit, warnings_list = self._fit_sarimax(series, order, seasonal_order)
+        if full_fit is None:
+            return None
+
+        if not bool(full_fit.mle_retvals.get("converged", False)):
+            return None
+
+        aicc = getattr(full_fit, "aicc", np.nan)
+        aicc_value = float(aicc) if np.isfinite(aicc) else float("inf")
+        pseudo_mae = self._pseudo_mae_last(full_fit)
+
+        return CandidateInitialScore(
+            order=order,
+            seasonal_order=seasonal_order,
+            aicc=aicc_value,
+            pseudo_mae_last=pseudo_mae,
+            warnings=list(warnings_list),
+            full_fit=full_fit,
+        )
+
+    @staticmethod
+    def _pseudo_mae_last(model_fit: Any) -> float:
+        """Approximate 1-step pseudo out-of-sample MAE using last filter residual."""
+        try:
+            residuals = np.asarray(model_fit.resid)
+            if residuals.size == 0:
+                return float("inf")
+            last_residual = residuals[-1]
+            if not np.isfinite(last_residual):
+                return float("inf")
+            return float(abs(last_residual))
+        except Exception:
+            return float("inf")
+
     def _evaluate_candidate(
         self,
         series: pd.Series,
@@ -416,6 +523,7 @@ class SARIMAOrderSelector:
         seasonal_order: Tuple[int, int, int, int],
         *,
         is_volatile: bool,
+        prefit: Optional[CandidateInitialScore] = None,
     ) -> Optional[CandidateResult]:
         """Evaluate a single SARIMA candidate via expanding-window CV."""
         folds_h1 = self._expanding_window_cv(series, order, seasonal_order)
@@ -442,9 +550,15 @@ class SARIMAOrderSelector:
             mean_mae_h3 = np.nan
             mae_std_h3 = np.nan
 
-        full_fit, warnings_full = self._fit_sarimax(series, order, seasonal_order)
-        if full_fit is None or full_fit.mle_retvals.get("converged", False) is False:
-            return None
+        if prefit and prefit.full_fit is not None:
+            full_fit = prefit.full_fit
+            if not bool(full_fit.mle_retvals.get("converged", False)):
+                return None
+            warnings_full = list(prefit.warnings)
+        else:
+            full_fit, warnings_full = self._fit_sarimax(series, order, seasonal_order)
+            if full_fit is None or full_fit.mle_retvals.get("converged", False) is False:
+                return None
 
         warning_messages = [msg for fold in folds_h1 for msg in fold.warnings]
         if folds_h3:
