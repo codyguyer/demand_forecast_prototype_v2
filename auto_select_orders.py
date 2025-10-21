@@ -12,7 +12,7 @@ from config import SARIMAConfig
 from sarima_auto_selector import SARIMAOrderSelector
 
 
-OUTPUT_FILE = Path("sarima_order_selection_results.csv")
+OUTPUT_FILE = Path("analysis_outputs") / "sarima_order_selection_results.csv"
 
 
 def main() -> None:
@@ -59,6 +59,7 @@ def main() -> None:
     elapsed = time.perf_counter() - start_time
 
     results_df = selector.results_to_dataframe(results)
+    OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
     results_df.to_csv(OUTPUT_FILE, index=False)
 
     print(f"\nSelection results written to {OUTPUT_FILE.resolve()}")

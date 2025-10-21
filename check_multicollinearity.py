@@ -194,7 +194,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-prefix",
         type=Path,
-        default=Path("analysis_outputs-multicollinearity"),
+        default=Path("analysis_outputs") / "multicollinearity",
         help="Base path (without extension) for correlation and VIF result files.",
     )
     parser.add_argument(

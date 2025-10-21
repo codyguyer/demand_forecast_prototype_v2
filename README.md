@@ -45,7 +45,7 @@ The script will:
 2. Optionally ingest Salesforce pipeline data and engineer exogenous features.
 3. Train SARIMA/SARIMAX models with a rolling test split for evaluation.
 4. Generate forward forecasts with confidence intervals.
-5. Save results to `sarima_forecast_results.csv` (ignored by default) and plots in `plots/`.
+5. Save results to `analysis_outputs/sarima_forecast_results.csv` (ignored by default) and plots in `plots/`.
 
 ### SARIMA Order Selection
 Run the automatic SARIMA search to score candidate orders per product (and BU when enabled):
@@ -54,7 +54,7 @@ Run the automatic SARIMA search to score candidate orders per product (and BU wh
 python auto_select_orders.py
 ```
 
-The selector writes a detailed report to `sarima_order_selection_results.csv` (MAE per fold, AICc, warnings, Ljung-Box p-values) and prints a JSON snippet with the recommended `(p, d, q, P, D, Q, m)` tuple for each series. Use those tuples to update `SARIMA_PARAMS` in `config.py` once you are comfortable with the diagnostics.
+The selector writes a detailed report to `analysis_outputs/sarima_order_selection_results.csv` (MAE per fold, AICc, warnings, Ljung-Box p-values) and prints a JSON snippet with the recommended `(p, d, q, P, D, Q, m)` tuple for each series. Use those tuples to update `SARIMA_PARAMS` in `config.py` once you are comfortable with the diagnostics.
 
 ## Salesforce Data Expectations
 `managed_data/salesforce_data.csv` should include the following columns (or the names mapped in `config.py`):

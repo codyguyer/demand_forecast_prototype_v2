@@ -105,7 +105,7 @@ class SARIMAConfig:
     # Output configuration
     OUTPUT_PLOTS = False
     SAVE_RESULTS = True
-    RESULTS_FILE = "sarima_forecast_results.csv"
+    RESULTS_FILE = str(BASE_DIR / "analysis_outputs" / "sarima_forecast_results.csv")
     PLOTS_DIR = "plots"
 
     # Short-history non-seasonal ARIMA fallback

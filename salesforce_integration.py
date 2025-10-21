@@ -343,7 +343,11 @@ class SalesforceIntegration:
         """
         if isinstance(filepath_or_data, str):
             data_path = Path(filepath_or_data)
-            self.pipeline_data = pd.read_csv(data_path)
+            try:
+                self.pipeline_data = pd.read_csv(data_path)
+            except UnicodeDecodeError:
+                print(f"Warning: UTF-8 decode failed for {data_path}; retrying with latin-1 encoding.")
+                self.pipeline_data = pd.read_csv(data_path, encoding="latin-1")
         else:
             self.pipeline_data = filepath_or_data.copy()
 

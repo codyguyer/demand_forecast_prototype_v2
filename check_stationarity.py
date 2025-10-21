@@ -168,7 +168,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-path",
         type=Path,
-        default=Path("analysis_outputs-stationarity_results.csv"),
+        default=Path("analysis_outputs") / "stationarity_results.csv",
         help="Where to write the aggregated diagnostics.",
     )
     parser.add_argument(

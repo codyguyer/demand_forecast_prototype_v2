@@ -6,6 +6,7 @@ Built from scratch for product demand forecasting with configurable parameters
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+from pathlib import Path
 import warnings
 warnings.filterwarnings('ignore')
 from statistics import NormalDist
@@ -156,13 +157,42 @@ class SARIMAForecaster:
         allowed = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
         return "".join(c if c in allowed else "_" for c in label)
 
+    @staticmethod
+    def _normalize_month_index(month_series):
+        """Convert a heterogeneous Month column into pandas timestamps."""
+        if month_series.empty:
+            return pd.to_datetime(month_series)
+
+        parsed = pd.to_datetime(month_series, errors="coerce")
+        unresolved_mask = parsed.isna() & month_series.notna()
+        if unresolved_mask.any():
+            numeric_candidates = pd.to_numeric(
+                month_series[unresolved_mask].astype(str).str.strip(),
+                errors="coerce",
+            )
+            excel_mask = numeric_candidates.notna()
+            if excel_mask.any():
+                excel_dates = pd.to_datetime("1899-12-30") + pd.to_timedelta(
+                    numeric_candidates[excel_mask].astype(int),
+                    unit="D",
+                )
+                parsed.loc[numeric_candidates[excel_mask].index] = excel_dates.values
+
+            remaining = parsed.isna() & month_series.notna()
+            if remaining.any():
+                samples = month_series[remaining].astype(str).unique().tolist()
+                preview = ", ".join(samples[:5])
+                raise ValueError(f"Unable to parse Month values: {preview}")
+
+        return parsed
+
     def load_and_preprocess_data(self):
         """Load data and combine product groups according to replacement logic"""
         print("Loading and preprocessing data...")
 
         # Load data
         self.data = pd.read_csv(self.config.DATA_FILE)
-        self.data['Month'] = pd.to_datetime(self.data['Month'])
+        self.data['Month'] = self._normalize_month_index(self.data['Month'])
         self.data = self.data.sort_values(['Product', 'Month'])
 
         self.combined_data = {}
@@ -1184,8 +1214,10 @@ class SARIMAForecaster:
                     })
         if self.config.SAVE_RESULTS and results_summary:
             results_df = pd.DataFrame(results_summary)
-            results_df.to_csv(self.config.RESULTS_FILE, index=False)
-            print(f"\nResults saved to {self.config.RESULTS_FILE}")
+            output_path = Path(self.config.RESULTS_FILE)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            results_df.to_csv(output_path, index=False)
+            print(f"\nResults saved to {output_path}")
 
         self.print_summary()
 

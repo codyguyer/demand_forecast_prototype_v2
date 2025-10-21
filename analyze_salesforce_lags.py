@@ -219,7 +219,7 @@ def main(argv: Optional[Iterable[str]] = None) -> None:
     parser = argparse.ArgumentParser(description="Evaluate Salesforce feature lags per product/BU.")
     parser.add_argument(
         "--config-class",
-        default="experiments.forecast_2025_test.experiment_config.Experiment2025Config",
+        default="config.SARIMAConfig",
         help="Dotted path to the configuration class to use.",
     )
     parser.add_argument(
