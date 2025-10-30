@@ -1,6 +1,8 @@
 # Ignore raw data exports and generated forecast outputs
 *.csv
 *txt
+*.xlsx
+*.pptx
 
 # Ignore generated analysis artifacts
 forecast_results_archive/
