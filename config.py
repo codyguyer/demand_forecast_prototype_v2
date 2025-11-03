@@ -36,8 +36,8 @@ class SARIMAConfig:
     # Data configuration
     DATA_FILE = str(MANAGED_DATA_DIR / "Actuals.csv")
     FORECAST_MONTHS = 12
-    CURRENT_MONTH = "2025-09"  # Use last fully completed month
-    USE_SALESFORCE = True
+    CURRENT_MONTH = "2025-10"  # Use last fully completed month
+    USE_SALESFORCE = False
     SALESFORCE_DATA_FILE = str(MANAGED_DATA_DIR / "salesforce_data_v2.csv")
     SALESFORCE_REFERENCE_FILE = str(MANAGED_DATA_DIR / "sf_product_reference_key.csv")
     USE_BACKLOG = False  # [ln(t)-ln(t-1)]*0.1 or (z-mean)/std and do not include any future months

@@ -673,13 +673,28 @@ class SARIMAForecaster:
         min_obs = getattr(self.config, "MIN_OBSERVATIONS", 12)
         return series_len >= min_obs
 
+    def _has_valid_sarima_params(self, group_name):
+        """Return True when the managed catalog contains a usable SARIMA order."""
+        params = getattr(self.config, "SARIMA_PARAMS", {}).get(group_name)
+        if not params or len(params) != 7:
+            return False
+
+        try:
+            _, _, _, _, _, _, seasonal_period = params
+        except (TypeError, ValueError):
+            return False
+
+        return seasonal_period is not None and seasonal_period > 0
+
     def determine_model_strategy(self, series, group_name):
         """Select which forecasting approach to use for a product group."""
         series_len = len(series)
         sarima_min = getattr(self.config, "SARIMA_MIN_HISTORY", None)
         arima_min = getattr(self.config, "ARIMA_MIN_HISTORY", getattr(self.config, "SHORT_SERIES_THRESHOLD", 24))
 
-        if sarima_min is not None and series_len >= sarima_min:
+        has_valid_sarima = self._has_valid_sarima_params(group_name)
+
+        if has_valid_sarima and (sarima_min is None or series_len >= sarima_min):
             return 'SARIMA'
 
         if self.should_use_short_series_arima(series, group_name):
@@ -687,6 +702,12 @@ class SARIMAForecaster:
 
         if self.should_use_theta_ets(series, group_name):
             return 'ETS_THETA'
+
+        if not has_valid_sarima:
+            if getattr(self.config, "SHORT_SERIES_ARIMA_ENABLED", False):
+                return 'ARIMA'
+            if getattr(self.config, "ETS_THETA_ENABLED", False):
+                return 'ETS_THETA'
 
         if sarima_min is None or series_len >= sarima_min:
             return 'SARIMA'
