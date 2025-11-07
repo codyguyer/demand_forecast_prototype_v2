@@ -140,7 +140,7 @@ class SARIMAOrderSelector:
         shortlist_extended_min_obs: int = 48,
     ) -> None:
         self.data = data.copy()
-        self.product_groups = product_groups
+        self.product_groups = self._normalize_product_groups(product_groups)
         self.forecast_by_bu = forecast_by_bu
         self.product_col = product_col
         self.date_col = date_col
@@ -191,6 +191,25 @@ class SARIMAOrderSelector:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+    def _normalize_product_groups(
+        self, product_groups: Dict[str, Sequence[str]]
+    ) -> Dict[str, List[str]]:
+        """Strip whitespace from catalog SKUs to ensure matching against Actuals."""
+        normalized: Dict[str, List[str]] = {}
+        for group_name, items in product_groups.items():
+            cleaned_items: List[str] = []
+            for item in items:
+                if item is None:
+                    continue
+                text = str(item).strip()
+                if text:
+                    cleaned_items.append(text)
+            if cleaned_items:
+                normalized[group_name] = cleaned_items
+            else:
+                normalized[group_name] = []
+        return normalized
+
     def _prepare_data(self) -> None:
         """Ensure date column is datetime and values are numeric."""
         if not np.issubdtype(self.data[self.date_col].dtype, np.datetime64):
@@ -216,6 +235,22 @@ class SARIMAOrderSelector:
 
         self.data = self.data.sort_values([self.product_col, self.date_col])
         self.data[self.value_col] = pd.to_numeric(self.data[self.value_col], errors="coerce").fillna(0.0)
+        if self.product_col in self.data.columns:
+            normalized_products = (
+                self.data[self.product_col]
+                .astype(str)
+                .str.strip()
+            )
+            normalized_products = normalized_products.replace({"nan": "", "None": ""})
+            self.data[self.product_col] = normalized_products
+        if self.forecast_by_bu and self.bu_col in self.data.columns:
+            normalized_bu = (
+                self.data[self.bu_col]
+                .astype(str)
+                .str.strip()
+            )
+            normalized_bu = normalized_bu.replace({"nan": "", "None": ""})
+            self.data[self.bu_col] = normalized_bu
 
     def _infer_season_length(self) -> int:
         """Infer seasonality from month spacing (defaults to annual seasonality)."""

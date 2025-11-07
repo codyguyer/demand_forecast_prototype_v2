@@ -193,6 +193,22 @@ class SARIMAForecaster:
         # Load data
         self.data = pd.read_csv(self.config.DATA_FILE)
         self.data['Month'] = self._normalize_month_index(self.data['Month'])
+
+        if 'Product' in self.data.columns:
+            self.data['Product'] = (
+                self.data['Product']
+                .astype(str)
+                .str.strip()
+                .replace({'nan': '', 'None': ''})
+            )
+        if 'BU' in self.data.columns:
+            self.data['BU'] = (
+                self.data['BU']
+                .astype(str)
+                .str.strip()
+                .replace({'nan': '', 'None': ''})
+            )
+
         self.data = self.data.sort_values(['Product', 'Month'])
 
         self.combined_data = {}
@@ -203,9 +219,14 @@ class SARIMAForecaster:
             raise ValueError("FORECAST_BY_BU is enabled but the source data is missing the 'BU' column.")
 
         for group_name, products in self.config.PRODUCT_GROUPS.items():
+            normalized_products = [
+                str(product).strip()
+                for product in products
+                if product is not None and str(product).strip()
+            ]
             print(f"Combining products for {group_name}: {products}")
 
-            group_data = self.data[self.data['Product'].isin(products)].copy()
+            group_data = self.data[self.data['Product'].isin(normalized_products)].copy()
             if group_data.empty:
                 print(f"Warning: No records found for {group_name} using products {products}")
                 continue
