@@ -56,7 +56,7 @@ class SARIMAConfig:
     SKU_TO_GROUP_MAP: Dict[str, str] = {}
 
     # Model evaluation parameters
-    CONFIDENCE_LEVEL = 0.90  # 90% confidence intervals (approx 1.645 std dev)
+    CONFIDENCE_LEVEL = 0.80  # confidence intervals (z-score from t-table)
     TEST_SPLIT_MONTHS = 6  # Number of months to hold out for testing
 
     # Future Salesforce integration parameters
@@ -110,13 +110,13 @@ class SARIMAConfig:
 
     # Short-history non-seasonal ARIMA fallback
     SHORT_SERIES_ARIMA_ENABLED = True
-    SHORT_SERIES_THRESHOLD = 24
+    SHORT_SERIES_THRESHOLD = 12
     SHORT_SERIES_ARIMA_DEFAULT_ORDER = (1, 1, 1)
     SHORT_SERIES_ARIMA_PARAMS: Dict[str, Tuple[int, int, int]] = {}
 
     # Model selection thresholds
     SARIMA_MIN_HISTORY = 36
-    ARIMA_MIN_HISTORY = 24
+    ARIMA_MIN_HISTORY = 12
 
     # Very short-history ETS/Theta blend fallback
     ETS_THETA_ENABLED = False

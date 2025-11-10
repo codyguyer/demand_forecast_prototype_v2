@@ -199,8 +199,10 @@ class SARIMAForecaster:
                 self.data['Product']
                 .astype(str)
                 .str.strip()
-                .replace({'nan': '', 'None': ''})
             )
+            self.data['Product'] = self.data['Product'].replace({'nan': '', 'None': ''})
+            # Normalize case so catalog SKU casing (e.g., prod_123 vs Prod_123) never blocks a match
+            self.data['Product'] = self.data['Product'].str.lower()
         if 'BU' in self.data.columns:
             self.data['BU'] = (
                 self.data['BU']
@@ -220,7 +222,7 @@ class SARIMAForecaster:
 
         for group_name, products in self.config.PRODUCT_GROUPS.items():
             normalized_products = [
-                str(product).strip()
+                str(product).strip().lower()
                 for product in products
                 if product is not None and str(product).strip()
             ]
